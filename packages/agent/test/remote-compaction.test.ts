@@ -32,7 +32,7 @@ import {
 	buildTransformedCodexRequestBody,
 	getOpenAICodexTransportDetails,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { buildParams, convertTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { buildParams, convertTools, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
@@ -2520,6 +2520,86 @@ describe("compact() remote compaction failure handling", () => {
 		expect(body.input.at(-1)).toEqual({ type: "compaction_trigger" });
 		expect(body.tools).toEqual(ordinary.tools);
 		expect(body.instructions).toBe("");
+	});
+
+	test.each([
+		{ name: "ordinary base URL", v2Endpoint: undefined, v2Strict: false },
+		{ name: "configured V2 endpoint", v2Endpoint: "https://compact.example/v1/responses", v2Strict: true },
+	])("applies the ordinary strict-tools fallback to V2 tools ($name)", async ({ v2Endpoint, v2Strict }) => {
+		const model = makeOpenAiModel({ remoteCompaction: { enabled: true, v2StreamingEnabled: true, v2Endpoint } });
+		const tools = [
+			{
+				name: "lookup",
+				description: "Look something up",
+				parameters: { type: "object", properties: { q: { type: "string" } }, required: ["q"] } as never,
+			},
+		];
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const ordinaryBodies: Array<{ tools: Array<Record<string, unknown>> }> = [];
+		let rejectStrict = true;
+		await streamOpenAIResponses(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }], tools },
+			{
+				apiKey: "test-key",
+				providerSessionState,
+				providerRetryWait: async () => {},
+				fetch: async (_input, init) => {
+					ordinaryBodies.push(JSON.parse(String(init?.body)));
+					if (rejectStrict) {
+						rejectStrict = false;
+						return Response.json(
+							{ error: { message: "Invalid schema for function 'lookup': strict mode unsupported" } },
+							{ status: 400 },
+						);
+					}
+					return sseResponse([
+						{
+							type: "response.completed",
+							response: {
+								id: "resp_1",
+								status: "completed",
+								output: [
+									{
+										id: "msg_1",
+										type: "message",
+										status: "completed",
+										role: "assistant",
+										content: [{ type: "output_text", text: "ok", annotations: [] }],
+									},
+								],
+								usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+							},
+						},
+					]);
+				},
+			},
+		).result();
+		const ordinaryStrict = ordinaryBodies.map(body => body.tools[0]?.strict === true);
+		expect(ordinaryStrict[0]).toBe(true);
+		expect(ordinaryStrict.slice(1)).toContain(false);
+		expect(ordinaryStrict.slice(1)).not.toContain(true);
+
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+		let v2Body: { tools: Array<Record<string, unknown>> } | undefined;
+		await compact(preparation, model, "test-key", undefined, undefined, {
+			tools,
+			providerSessionState,
+			fetch: async (_input, init) => {
+				v2Body = JSON.parse(String(init?.body));
+				return sseResponse([
+					{
+						type: "response.output_item.done",
+						output_index: 0,
+						item: { type: "compaction", encrypted_content: "enc" },
+					},
+					{ type: "response.completed", response: { usage: { input_tokens: 1 } } },
+				]);
+			},
+		});
+		expect(v2Body?.tools[0]?.strict === true).toBe(v2Strict);
+		if (!v2Strict) expect(v2Body?.tools).toEqual(ordinaryBodies.at(-1)?.tools);
 	});
 
 	test("sanitizes saved V2 native replay before sending a second Responses compaction", async () => {

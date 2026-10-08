@@ -32,7 +32,7 @@ import {
 	type OpenAICodexCompactionBody,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { InputItem as CodexInputItem } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
-import { convertTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { convertTools, openAIResponsesStrictToolsEnabled } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput, resolveOpenAICompatPolicy } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import {
 	sanitizeOpenAIResponsesHistoryItemsForReplay,
@@ -692,7 +692,12 @@ export interface SummaryOptions {
 		retained: AgentMessage[],
 		signal?: AbortSignal,
 	) => Promise<Context>;
-	/** Provider projection for the full V2 history, including new messages after the shared prefix. */
+	/**
+	 * Provider projection for the full V2 history, including new messages after the
+	 * shared prefix. When native history exists, `messages` leads with the previous
+	 * compaction summary carrying it, as the live context does, so the returned
+	 * context replays that history in place of the separately stored copy.
+	 */
 	buildOpenAiV2Context?: (
 		messages: AgentMessage[],
 		model: Model,
@@ -1722,8 +1727,29 @@ export async function compact(
 				? previousRemoteCompaction.replacementHistory
 				: undefined;
 		const convertToLlm = summaryOptions.convertToLlm ?? defaultConvertToLlm;
+		// The live context leads with the previous native summary; give the
+		// projection the same head so it can match and replay it in place.
+		const previousNativeSummary =
+			previousReplacementHistory && summaryOptions.buildOpenAiV2Context
+				? createCompactionSummaryMessage(
+						previousSummary ?? "",
+						tokensBefore,
+						preparation.previousSummaryTimestamp ?? new Date().toISOString(),
+						{
+							providerPayload: {
+								type: "openaiResponsesHistory",
+								provider: model.provider,
+								items: previousReplacementHistory,
+							},
+						},
+					)
+				: undefined;
 		const liveContext = !isCodexResponsesModel(model)
-			? await summaryOptions.buildOpenAiV2Context?.(remoteMessages, model, signal)
+			? await summaryOptions.buildOpenAiV2Context?.(
+					previousNativeSummary ? [previousNativeSummary, ...remoteMessages] : remoteMessages,
+					model,
+					signal,
+				)
 			: undefined;
 		const messages = liveContext?.messages ?? convertToLlm(remoteMessages);
 		const inlineSystemPrompt =
@@ -1791,7 +1817,7 @@ export async function compact(
 			remoteHistory = buildOpenAiResponsesCompactionInput(
 				messages,
 				model,
-				previousReplacementHistory,
+				liveContext ? undefined : previousReplacementHistory,
 				inlineSystemPrompt,
 			);
 			for (const message of userMessages) {
@@ -1807,16 +1833,19 @@ export async function compact(
 					: inlineSystemPrompt
 						? ""
 						: normalizeSystemPrompts(liveContext?.systemPrompt ?? remoteSystemPrompt).join("\n\n");
+				// A configured V2 endpoint is a different backend: the session's
+				// strict-tools fallback, learned per provider/base URL/model, applies
+				// only when V2 posts to the ordinary base URL.
+				const strictTools =
+					model.remoteCompaction?.v2Endpoint || model.remoteCompaction?.streamingEndpoint
+						? model.compat.supportsStrictMode
+						: openAIResponsesStrictToolsEnabled(model, summaryOptions.providerSessionState, model.baseUrl);
 				const tools = codexBody
 					? Array.isArray(codexBody.tools)
 						? codexBody.tools
 						: undefined
 					: liveContext?.tools !== undefined || summaryOptions.tools !== undefined
-						? convertTools(
-								liveContext?.tools ?? summaryOptions.tools ?? [],
-								model.compat.supportsStrictMode,
-								model,
-							)
+						? convertTools(liveContext?.tools ?? summaryOptions.tools ?? [], strictTools, model)
 						: undefined;
 				const trimmed = trimRemoteCompactionInputToContextWindow(
 					remoteHistory,

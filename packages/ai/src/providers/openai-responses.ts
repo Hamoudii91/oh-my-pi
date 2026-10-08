@@ -440,17 +440,40 @@ function createOpenAIResponsesProviderSessionState(): OpenAIResponsesProviderSes
 	return state;
 }
 
+function peekOpenAIResponsesProviderSessionState(
+	model: Model,
+	providerSessionState: Map<string, ProviderSessionState> | undefined,
+): OpenAIResponsesProviderSessionState | undefined {
+	return providerSessionState?.get(`${OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX}${model.provider}`) as
+		| OpenAIResponsesProviderSessionState
+		| undefined;
+}
+
 function getOpenAIResponsesProviderSessionState(
 	model: Model<"openai-responses">,
 	providerSessionState: Map<string, ProviderSessionState> | undefined,
 ): OpenAIResponsesProviderSessionState | undefined {
 	if (!providerSessionState) return undefined;
-	const key = `${OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX}${model.provider}`;
-	const existing = providerSessionState.get(key) as OpenAIResponsesProviderSessionState | undefined;
+	const existing = peekOpenAIResponsesProviderSessionState(model, providerSessionState);
 	if (existing) return existing;
 	const created = createOpenAIResponsesProviderSessionState();
-	providerSessionState.set(key, created);
+	providerSessionState.set(`${OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX}${model.provider}`, created);
 	return created;
+}
+
+/**
+ * Whether ordinary Responses requests to `baseUrl` send strict tool schemas,
+ * honoring the session's strict-tools fallback for that provider/base URL/model.
+ * V2 compaction calls this so a request to the same backend keeps the decision.
+ */
+export function openAIResponsesStrictToolsEnabled(
+	model: Model<"openai-responses" | "azure-openai-responses" | "openai-codex-responses">,
+	providerSessionState: Map<string, ProviderSessionState> | undefined,
+	baseUrl: string | undefined,
+): boolean {
+	if (model.compat.supportsStrictMode === false) return false;
+	const state = peekOpenAIResponsesProviderSessionState(model, providerSessionState);
+	return !isStrictToolsDisabledForScope(state, getOpenAIStrictToolsScope(model, baseUrl));
 }
 
 /** Host per-provider storage defaults; see {@link configureProviderStoreResponses}. */

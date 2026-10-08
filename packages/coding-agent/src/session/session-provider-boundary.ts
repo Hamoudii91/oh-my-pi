@@ -247,7 +247,17 @@ export class SessionProviderBoundary {
 				};
 			}
 		}
-		const transformed = await this.#host.transformContext(messages, signal);
+		// Rebuild from the live summary object, as live turns do: conversion caches
+		// and the date/cwd reminder key on message identity.
+		const liveSummary = this.#host.agent.state.messages[0];
+		const first = messages[0];
+		const history =
+			first?.role === "compactionSummary" &&
+			liveSummary?.role === "compactionSummary" &&
+			liveSummary.timestamp === first.timestamp
+				? [liveSummary, ...messages.slice(1)]
+				: messages;
+		const transformed = await this.#host.transformContext(history, signal);
 		return this.#host.agent.buildSideRequestContext(this.convertToLlmForSideRequest(transformed));
 	}
 
