@@ -239,12 +239,17 @@ export class SessionProviderBoundary {
 			}
 			if (shared) {
 				if (projection.sourceLength === messages.length) return projection.context;
-				const tail = messages.slice(projection.sourceLength);
-				const converted = this.convertToLlmForSideRequest(tail);
-				return {
-					...projection.context,
-					messages: [...projection.context.messages, ...normalizeMessagesForProvider(converted, model)],
-				};
+				// The pinned prefix keeps the stateful `transformContext` output it was
+				// sent with; only the provider transforms (images, snapcompact,
+				// reminders, secrets) rerun, over the whole request as the next live
+				// turn would, so a new tail gets the same rewrites. The prefix objects
+				// are the ones the live turn transformed, so identity-keyed transform
+				// state is unchanged.
+				const tail = await this.#host.convertToLlm(messages.slice(projection.sourceLength));
+				return this.#host.agent.transformSideRequestContext({
+					...projection.input,
+					messages: [...projection.input.messages, ...normalizeMessagesForProvider(tail, model)],
+				});
 			}
 		}
 		// Rebuild from the live summary object, as live turns do: conversion caches

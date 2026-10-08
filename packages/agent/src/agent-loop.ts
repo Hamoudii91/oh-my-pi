@@ -1409,11 +1409,11 @@ async function runLoopBody(
 					return;
 				}
 
-				config.onPreparedProviderCall?.(
-					currentContext.messages,
-					preparedProviderCall.context,
-					preparedProviderCall.model,
-				);
+				config.onPreparedProviderCall?.(currentContext.messages, {
+					input: preparedProviderCall.input,
+					context: preparedProviderCall.context,
+					model: preparedProviderCall.model,
+				});
 
 				if (!turnOpen) {
 					stream.push({ type: "turn_start" });
@@ -1848,6 +1848,8 @@ async function emitHarmonyAudit(
 
 interface PreparedProviderCall {
 	model: Model;
+	/** Context handed to `transformProviderContext`: converted, normalized, tools prepared. */
+	input: Context;
 	context: Context;
 	promptToolWireTools: Context["tools"];
 	ownedDialect: Dialect | undefined;
@@ -1950,6 +1952,7 @@ async function prepareProviderCall(
 			}),
 		};
 	}
+	const input = llmContext;
 	if (config.transformProviderContext) {
 		llmContext = await config.transformProviderContext(llmContext, model);
 	}
@@ -1970,7 +1973,7 @@ async function prepareProviderCall(
 		const inactiveTools = config.sentToolDefinitions.inactiveFor(llmContext.messages, llmContext.tools);
 		if (inactiveTools) llmContext = { ...llmContext, inactiveTools };
 	}
-	return { model, context: llmContext, promptToolWireTools, ownedDialect };
+	return { model, input, context: llmContext, promptToolWireTools, ownedDialect };
 }
 
 /**

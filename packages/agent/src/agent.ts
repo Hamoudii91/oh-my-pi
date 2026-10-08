@@ -103,6 +103,9 @@ function refreshToolChoiceForActiveTools(
 export interface PreparedProviderProjection {
 	source: readonly AgentMessage[];
 	sourceLength: number;
+	/** Context before `transformProviderContext`; extend it, then {@link Agent.transformSideRequestContext}. */
+	input: Context;
+	/** Context as sent to the provider. */
 	context: Context;
 	model: Model;
 }
@@ -927,14 +930,23 @@ export class Agent {
 					injectIntent: this.#intentTracing,
 					pruneDescriptions: this.#pruneToolDescriptions,
 				}) ?? []);
-		let context: Context = { systemPrompt, messages, tools };
-		if (this.#transformProviderContext) context = await this.#transformProviderContext(context, model);
+		return this.transformSideRequestContext({ systemPrompt, messages, tools });
+	}
+
+	/**
+	 * Apply the main loop's provider transforms (images, snapcompact, reminders,
+	 * secrets) to an assembled side-request context, without recording its tools.
+	 */
+	async transformSideRequestContext(context: Context): Promise<Context> {
+		const model = this.#state.model;
+		if (!model) throw new Error("No active model on agent");
+		let transformed = this.#transformProviderContext ? await this.#transformProviderContext(context, model) : context;
 		// Side requests reuse the main loop's sent definitions without recording their own.
-		if (context.tools?.length) {
-			const inactiveTools = this.#sentToolDefinitions.inactiveFor(context.messages, context.tools);
-			if (inactiveTools) context = { ...context, inactiveTools };
+		if (transformed.tools?.length) {
+			const inactiveTools = this.#sentToolDefinitions.inactiveFor(transformed.messages, transformed.tools);
+			if (inactiveTools) transformed = { ...transformed, inactiveTools };
 		}
-		return context;
+		return transformed;
 	}
 
 	subscribe(fn: (e: AgentEvent) => void): () => void {
@@ -1866,13 +1878,8 @@ export class Agent {
 				this.#onModelCallSystemPrompt?.(context.systemPrompt);
 				context.tools = this.#toolsForModel(this.#state.model ?? model);
 			},
-			onPreparedProviderCall: (source, prepared, preparedModel) => {
-				this.#lastPreparedProviderCall = {
-					source,
-					sourceLength: source.length,
-					context: prepared,
-					model: preparedModel,
-				};
+			onPreparedProviderCall: (source, prepared) => {
+				this.#lastPreparedProviderCall = { source, sourceLength: source.length, ...prepared };
 			},
 			beforeModelCall:
 				this.#beforeModelCall || this.#additionalBeforeModelCalls.size > 0

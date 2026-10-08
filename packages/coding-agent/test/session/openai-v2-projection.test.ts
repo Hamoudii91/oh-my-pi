@@ -18,7 +18,11 @@ import { SessionProviderBoundary } from "@oh-my-pi/pi-coding-agent/session/sessi
 import { isRecord, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "../helpers/agent-session-setup";
 
-/** Agent plus provider boundary sharing one stateful `context` transform that counts its invocations. */
+/**
+ * Agent plus provider boundary sharing one stateful `context` transform that counts
+ * its invocations, and a provider transform that rewrites images as the
+ * production image pipeline does.
+ */
 async function createProjectionFixture(tempDir: TempDir, model: Model, messages: AgentMessage[]) {
 	const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
 	const state = { calls: 0 };
@@ -34,6 +38,19 @@ async function createProjectionFixture(tempDir: TempDir, model: Model, messages:
 		initialState: { model, systemPrompt: ["session instructions"], messages, tools: [] },
 		transformContext,
 		convertToLlm: defaultConvertToLlm,
+		transformProviderContext: context => ({
+			...context,
+			messages: context.messages.map(message =>
+				message.role === "toolResult"
+					? {
+							...message,
+							content: message.content.map(part =>
+								part.type === "image" ? { type: "text" as const, text: "[provider-rewritten image]" } : part,
+							),
+						}
+					: message,
+			),
+		}),
 		streamFn: () => {
 			const stream = new AssistantMessageEventStream();
 			queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: createAssistantMessage("reply") }));
@@ -77,7 +94,10 @@ test("native V2 reuses the pinned stateful context projection after another turn
 		role: "toolResult",
 		toolCallId: "call-read",
 		toolName: "read",
-		content: [{ type: "text", text: "file contents" }],
+		content: [
+			{ type: "text", text: "file contents" },
+			{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+		],
 		isError: false,
 		timestamp: 10,
 	};
@@ -86,7 +106,13 @@ test("native V2 reuses the pinned stateful context projection after another turn
 	expect(prepared?.systemPrompt).toEqual(pinned.context.systemPrompt);
 	expect(prepared?.messages.slice(0, -2)).toEqual(firstProjection);
 	expect(prepared?.messages.at(-2)).toMatchObject({ content: call.content });
-	expect(prepared?.messages.at(-1)).toMatchObject({ role: "toolResult", content: tail.content });
+	expect(prepared?.messages.at(-1)).toMatchObject({
+		role: "toolResult",
+		content: [
+			{ type: "text", text: "file contents" },
+			{ type: "text", text: "[provider-rewritten image]" },
+		],
+	});
 	expect(prepared?.messages[0]).toMatchObject({ content: "date/cwd reminder 1" });
 	expect(prepared?.messages[1]).toMatchObject({ content: "extension insertion 1" });
 });

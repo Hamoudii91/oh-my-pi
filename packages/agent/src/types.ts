@@ -385,8 +385,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * the run is canceled or its deadline expires.
 	 */
 	beforeModelCall?: AgentBeforeModelCall;
-	/** Records the source history and completed provider projection for native side requests. */
-	onPreparedProviderCall?: (source: AgentMessage[], context: Context, model: Model) => void;
+	/**
+	 * Records the source history with the provider request built from it: `input`
+	 * before `transformProviderContext`, `context` as sent. Native compaction
+	 * reuses it so stateful context transforms are not run twice.
+	 */
+	onPreparedProviderCall?: (
+		source: AgentMessage[],
+		prepared: { input: Context; context: Context; model: Model },
+	) => void;
 
 	/**
 	 * Optional transform applied to tool call arguments before execution.
