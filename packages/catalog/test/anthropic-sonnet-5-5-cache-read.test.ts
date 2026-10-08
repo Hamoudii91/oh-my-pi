@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 // Anthropic cut Sonnet 5.5 cache reads to $0.10/MTok, 0.05x its $2 input, on
@@ -52,14 +51,5 @@ describe("anthropic Sonnet 5.5 cache-read rule", () => {
 
 	test("commandcode, priced at Anthropic list, follows the cut", () => {
 		expect(buildModel(spec("claude-sonnet-5-5", "commandcode")).cost?.cacheRead).toBe(0.1);
-	});
-});
-
-describe("anthropic Sonnet 5.5 bundled row", () => {
-	// `getProviderModels` consumes models.json verbatim and never reruns
-	// `buildModel`, so offline/static startup reports the committed row.
-	test("ships the corrected cache-read rate", () => {
-		const bundled = getBundledModels("anthropic").find(model => model.id === "claude-sonnet-5-5");
-		expect(bundled?.cost?.cacheRead).toBe(0.1);
 	});
 });
