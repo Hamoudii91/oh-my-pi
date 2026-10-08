@@ -36,7 +36,7 @@ import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
-import { completeSimple, streamSimple } from "../stream";
+import { completeSimple, googleCliRequestRoute, streamSimple } from "../stream";
 import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
@@ -235,6 +235,12 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	return opts;
 }
 
+function credentialWireId(model: Model<Api>, options: SimpleStreamOptions): string | undefined {
+	return model.api === "google-gemini-cli" && model.accountAccess
+		? googleCliRequestRoute(model, options).requestModelId
+		: undefined;
+}
+
 function clientClosedResponse(route: { module: FormatModule }): Response {
 	return route.module.formatError(499, "request_aborted", "client closed request");
 }
@@ -358,11 +364,11 @@ async function handleFormatEndpoint(
 	// expected to resolve the credential and pass it as `options.apiKey`.
 	// For OAuth providers this returns the access token (refreshed via the
 	// broker override on AuthStorage when needed).
-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
+	const streamOpts = buildStreamOptions(parsed, model.api, controller.signal);
+	const wireModelId = credentialWireId(model, streamOpts);
+	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer, wireModelId);
 	if (controller.signal.aborted) return clientClosedResponse(route);
 	if ("status" in apiKey) return route.module.formatError(apiKey.status, apiKey.type, apiKey.message);
-
-	const streamOpts = buildStreamOptions(parsed, model.api, controller.signal);
 	if (bootOpts.fetch) streamOpts.fetch = bootOpts.fetch;
 	// Per-session provider learning (sticky strict-tools / fast-mode / thinking
 	// fallbacks, Codex transport sessions). Owned by this gateway instance: the
@@ -388,6 +394,7 @@ async function handleFormatEndpoint(
 		peer,
 		resolvedKey =>
 			lease.updateAccount(resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey)),
+		wireModelId,
 	);
 
 	logger.info("auth-gateway request", {
@@ -553,7 +560,8 @@ async function handlePiNative(
 	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context, toolsJson);
 	parsed.options.sessionId = sessionId;
 
-	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
+	const wireModelId = credentialWireId(model, parsed.options);
+	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer, wireModelId);
 	if (controller.signal.aborted) return aborted();
 	if ("status" in apiKey) return piNative.formatError(apiKey.status, apiKey.type, apiKey.message);
 
@@ -590,6 +598,7 @@ async function handlePiNative(
 		peer,
 		resolvedKey =>
 			lease.updateAccount(resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, resolvedKey)),
+		wireModelId,
 	);
 	if (model.api === "openai-codex-responses") {
 		delete streamOpts.temperature;

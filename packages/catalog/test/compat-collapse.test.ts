@@ -1735,9 +1735,45 @@ describe("antigravity discovery collapsing", () => {
 		});
 		const result = await resolveProviderModels({ ...options, cacheDbPath: path.join(dir, "models.db") }, "online");
 		expect(result.models.find(model => model.id === "claude-opus-5-5")?.accountAccess).toEqual({
-			"healthy@example.com": {},
+			"healthy@example.com": { wireModelIds: ["claude-opus-5-5-low"] },
 		});
 		expect(result.models.some(model => model.id === "claude-sonnet-5-5")).toBe(false);
+	});
+
+	it("keeps every served effort route without granting unsupported routes to sibling accounts", async () => {
+		const fetcher = Object.assign(
+			(input: string | URL | Request, init?: RequestInit) => {
+				if (!String(input).includes(":fetchAvailableModels"))
+					return Promise.resolve(new Response("version: 2.19.1\n"));
+				const tiers =
+					new Headers(init?.headers).get("Authorization") === "Bearer low" ? ["low"] : ["low", "medium", "high"];
+				return Promise.resolve(
+					Response.json({
+						models: Object.fromEntries(
+							tiers.map(tier => [`claude-opus-5-5-${tier}`, { supportsThinking: true }]),
+						),
+					}),
+				);
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const options = googleAntigravityModelManagerOptions({
+			resolveAccounts: async () => [
+				{ accessToken: "low", accountKey: "low@example.com" },
+				{ accessToken: "all", accountKey: "all@example.com" },
+			],
+			endpoint: "https://cca.test",
+			fetch: fetcher,
+		});
+		const models = await options.fetchDynamicModels?.();
+		const opus = models?.find(model => model.id === "claude-opus-5-5");
+		expect(opus?.thinking?.effortRouting?.[Effort.High]).toBe("claude-opus-5-5-high");
+		expect(opus?.accountAccess).toEqual({
+			"low@example.com": { wireModelIds: ["claude-opus-5-5-low"] },
+			"all@example.com": {
+				wireModelIds: ["claude-opus-5-5-low", "claude-opus-5-5-medium", "claude-opus-5-5-high"],
+			},
+		});
 	});
 
 	it("keeps the previous Antigravity catalog when a sibling fetch fails transiently", async () => {

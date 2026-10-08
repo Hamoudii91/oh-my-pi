@@ -19,6 +19,7 @@ import type {
 	ThinkingConfig,
 } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { modelAccountRouting } from "@oh-my-pi/pi-catalog/provider-models/account-access";
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import { collapseBuiltVariants } from "@oh-my-pi/pi-catalog/compat/collapse";
 import {
@@ -2999,10 +3000,12 @@ export class ModelRegistry {
 		if (this.#isKeylessProvider(model.provider)) {
 			return kNoAuth;
 		}
+		const routing = modelAccountRouting(model);
 		return this.authStorage.keys.get(model.provider, sessionId, {
 			baseUrl: model.baseUrl,
 			modelId: model.id,
-			accountIds: model.accountAccess && Object.keys(model.accountAccess),
+			accountIds: routing?.accountIds,
+			requireAccountIds: routing?.strict,
 			signal: options?.signal,
 		});
 	}
@@ -3061,11 +3064,13 @@ export class ModelRegistry {
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
 		}
-		const accountAccess = options?.modelId ? this.find(provider, options.modelId)?.accountAccess : undefined;
+		const model = options?.modelId ? this.find(provider, options.modelId) : undefined;
+		const routing = model && modelAccountRouting(model, options?.wireModelId);
 		return this.authStorage.keys.getWithCredential(provider, sessionId, {
 			baseUrl: options?.baseUrl,
 			modelId: options?.modelId,
-			accountIds: accountAccess && Object.keys(accountAccess),
+			accountIds: routing?.accountIds,
+			requireAccountIds: routing?.strict,
 			forceRefresh: options?.forceRefresh,
 			refreshReason: options?.refreshReason,
 			signal: options?.signal,

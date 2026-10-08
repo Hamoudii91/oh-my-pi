@@ -1361,6 +1361,8 @@ export interface ModelAccountAccess {
 	 * Absent when the backend reported no program metadata.
 	 */
 	cyberPrograms?: readonly string[];
+	/** Wire model IDs this account advertised for this logical model (Antigravity effort-tier routing). */
+	wireModelIds?: readonly string[];
 }
 
 /** One Cursor `RequestedModel.parameters` entry recovered from rich discovery. */
@@ -1485,9 +1487,9 @@ export interface Model<TApi extends Api = Api> {
 	 * Per-account availability recorded by multi-account discovery: provider
 	 * account key (Codex: ChatGPT `chatgpt_account_id`; Antigravity: login
 	 * email) → that account's entitlements on this model. An account appears
-	 * only when its own catalog lists the model, so credential selection can
-	 * route account-gated models (e.g. `gpt-daybreak-blue-latest`, Antigravity
-	 * Claude 5.5) straight to eligible accounts. Absent on bundled/config rows.
+	 * only when its own catalog lists the model; Antigravity also records the
+	 * advertised wire IDs so credential selection routes each effort tier to
+	 * an account that serves it. Absent on bundled/config rows.
 	 */
 	accountAccess?: Readonly<Record<string, ModelAccountAccess>>;
 	/** Cursor `RequestedModel.parameters` for this model's default variant. */

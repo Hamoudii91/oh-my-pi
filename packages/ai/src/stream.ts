@@ -17,6 +17,7 @@ import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
+import type { ApiKeyResolver } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
@@ -1286,6 +1287,12 @@ function streamSimpleRequest<TApi extends Api>(
 
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
 	if (apiKeyResolver) {
+		const wireModelId =
+			model.api === "google-gemini-cli" && model.accountAccess
+				? googleCliRequestRoute(model, requestOptions).requestModelId
+				: undefined;
+		const resolveForWire: ApiKeyResolver =
+			wireModelId === undefined ? apiKeyResolver : context => apiKeyResolver({ ...context, wireModelId });
 		const outer = new AssistantMessageEventStream();
 		const signal = requestOptions?.signal;
 		// One inner attempt against a resolved key, or against the Bedrock AWS
@@ -1374,7 +1381,7 @@ function streamSimpleRequest<TApi extends Api>(
 			let credentialId: number | undefined;
 			let oauthIdentity: OAuthRequestIdentity | undefined;
 			try {
-				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
+				const resolved = await resolveForWire({ lastChance: false, error: undefined, signal });
 				lastKey = resolvedApiKeyBearer(resolved);
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
@@ -1409,7 +1416,7 @@ function streamSimpleRequest<TApi extends Api>(
 				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
 				const nextKey = await resolveNextAuthRetryKey(
 					retryState,
-					apiKeyResolver,
+					resolveForWire,
 					failure.error,
 					signal,
 					resolved => {
@@ -1774,6 +1781,32 @@ function normalizeMandatoryReasoningOptions<TApi extends Api>(
 	const floor = defaultSupportedEffort(model);
 	if (floor === undefined) return options;
 	return { ...options, reasoning: floor, disableReasoning: undefined, forceReasoningOff: undefined };
+}
+
+type GoogleCliRoute =
+	| { requestModelId: string; effort: Effort; mode: "google-level" }
+	| { requestModelId: string; effort: Effort; thinkingBudget: number; maxTokens: number }
+	| { requestModelId: string; effort?: undefined };
+
+/** Resolve the Google CLI wire model and thinking budget before choosing an account. */
+export function googleCliRequestRoute(model: Model<Api>, rawOptions?: SimpleStreamOptions): GoogleCliRoute {
+	const options = normalizeMandatoryReasoningOptions(model, rawOptions);
+	const reasoning = options?.reasoning;
+	if (reasoning && model.reasoning && !options?.disableReasoning && !options?.forceReasoningOff) {
+		const effort = requireSupportedEffort(model, reasoning);
+		const requestModelId = resolveWireModelId(model, effort);
+		if (model.thinking?.mode === "google-level") return { requestModelId, effort, mode: "google-level" };
+		let thinkingBudget =
+			options.thinkingBudgets?.[effort] ?? model.thinking?.effortBudgets?.[effort] ?? GOOGLE_THINKING[effort];
+		const maxTokens = maxTokensWithThinkingBudget(
+			options.maxTokens ?? model.maxTokens ?? undefined,
+			model.maxTokens,
+			thinkingBudget,
+		);
+		if (maxTokens <= thinkingBudget) thinkingBudget = Math.max(0, maxTokens - MIN_OUTPUT_TOKENS);
+		if (thinkingBudget > 0) return { requestModelId, effort, thinkingBudget, maxTokens };
+	}
+	return { requestModelId: resolveWireModelId(model, undefined) };
 }
 
 function supportsExplicitOpenAIResponsesPromptCache(compat: unknown): boolean {
@@ -2169,49 +2202,28 @@ function mapOptionsForApi<TApi extends Api>(
 		}
 
 		case "google-gemini-cli": {
-			const reasoning = options?.reasoning;
+			const route = googleCliRequestRoute(model, options);
 			const toolChoice = mapGoogleToolChoice(options?.toolChoice);
-			if (reasoning && model.reasoning && !options?.disableReasoning && !options?.forceReasoningOff) {
-				const effort = requireSupportedEffort(model, reasoning);
-
-				// Gemini 3+ models use thinkingLevel instead of thinkingBudget
-				if (model.thinking?.mode === "google-level") {
+			if (route.effort !== undefined) {
+				if ("mode" in route) {
 					return castApi<"google-gemini-cli">({
 						...base,
-						requestModelId: resolveWireModelId(model, effort),
-						thinking: {
-							enabled: true,
-							level: mapEffortToGoogleThinkingLevel(effort, model),
-						},
+						requestModelId: route.requestModelId,
+						thinking: { enabled: true, level: mapEffortToGoogleThinkingLevel(route.effort, model) },
 						hideThinkingSummary: options?.hideThinkingSummary,
 						toolChoice,
 						antigravityEndpointMode: options?.antigravityEndpointMode,
 					});
 				}
-
-				let thinkingBudget =
-					options.thinkingBudgets?.[effort] ?? model.thinking?.effortBudgets?.[effort] ?? GOOGLE_THINKING[effort];
-
-				// Caller's maxTokens is desired output, so add thinking budget on top. With no caller/model cap, use a finite total fallback.
-				const maxTokens = maxTokensWithThinkingBudget(base.maxTokens, model.maxTokens, thinkingBudget);
-
-				// If not enough room for thinking + output, reduce thinking budget
-				if (maxTokens <= thinkingBudget) {
-					thinkingBudget = Math.max(0, maxTokens - MIN_OUTPUT_TOKENS);
-				}
-
-				if (thinkingBudget > 0) {
-					return castApi<"google-gemini-cli">({
-						...base,
-						maxTokens,
-						requestModelId: resolveWireModelId(model, effort),
-						thinking: { enabled: true, budgetTokens: thinkingBudget },
-						hideThinkingSummary: options?.hideThinkingSummary,
-						toolChoice,
-						antigravityEndpointMode: options?.antigravityEndpointMode,
-					});
-				}
-				// Budget clamped to zero — fall through to the thinking-off path.
+				return castApi<"google-gemini-cli">({
+					...base,
+					maxTokens: route.maxTokens,
+					requestModelId: route.requestModelId,
+					thinking: { enabled: true, budgetTokens: route.thinkingBudget },
+					hideThinkingSummary: options?.hideThinkingSummary,
+					toolChoice,
+					antigravityEndpointMode: options?.antigravityEndpointMode,
+				});
 			}
 
 			const thinking: GoogleGeminiCliOptions["thinking"] = { enabled: false };
@@ -2222,7 +2234,7 @@ function mapOptionsForApi<TApi extends Api>(
 			}
 			return castApi<"google-gemini-cli">({
 				...base,
-				requestModelId: resolveWireModelId(model, undefined),
+				requestModelId: route.requestModelId,
 				thinking,
 				toolChoice,
 				antigravityEndpointMode: options?.antigravityEndpointMode,

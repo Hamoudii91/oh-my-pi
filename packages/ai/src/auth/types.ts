@@ -472,8 +472,12 @@ export interface ModelUsageHealthOptions {
 export type AuthApiKeyOptions = {
 	baseUrl?: string;
 	modelId?: string;
-	/** {@link oauthAccountKey}s of accounts known to serve `modelId` from multi-account discovery; OAuth selection prefers them and tries other accounts only as a last resort. */
+	/** {@link oauthAccountKey}s serving `modelId`; selection prefers them unless `requireAccountIds` forbids fallback. */
 	accountIds?: readonly string[];
+	/** Never fall back to accounts outside `accountIds` (a missing wire variant would 404). */
+	requireAccountIds?: boolean;
+	/** Selected upstream wire ID used by registry-backed resolvers to filter per-account variants. */
+	wireModelId?: string;
 	/**
 	 * Caller's cancel signal. Threaded into any broker-bound OAuth refresh so
 	 * `ESC` / request abort actually kills a hung broker fetch instead of

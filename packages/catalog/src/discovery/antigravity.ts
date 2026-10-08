@@ -154,12 +154,15 @@ export interface FetchAntigravityDiscoveryModelsOptions {
 }
 
 /**
- * A complete account roster, or a definitive 401/403 credential rejection.
- * `null` from {@link fetchAntigravityDiscoveryModels} instead means a transient
- * failure or invalid response, which must not replace an authoritative catalog.
+ * A complete account roster with both raw wire IDs and collapsed logical
+ * models, or a definitive 401/403 credential rejection. `null` instead means
+ * a transient failure or invalid response, which must not replace an
+ * authoritative catalog.
  */
 export interface AntigravityModelDiscoveryResult {
 	models: ModelSpec<"google-gemini-cli">[];
+	/** Uncollapsed wire rows for multi-account union and per-account route availability. */
+	rawModels: ModelSpec<"google-gemini-cli">[];
 	rejectedStatus?: 401 | 403;
 }
 
@@ -175,7 +178,7 @@ export async function fetchAntigravityDiscoveryModels(
 ): Promise<AntigravityModelDiscoveryResult | null> {
 	const discovered = await fetchAntigravityDiscoveryResponse(options);
 	if (!discovered) return null;
-	if ("rejectedStatus" in discovered) return { models: [], rejectedStatus: discovered.rejectedStatus };
+	if ("rejectedStatus" in discovered) return { models: [], rawModels: [], rejectedStatus: discovered.rejectedStatus };
 
 	const models: ModelSpec<"google-gemini-cli">[] = [];
 	const apiModels = discovered.payload.models;
@@ -218,7 +221,7 @@ export async function fetchAntigravityDiscoveryModels(
 		options.collapseTable === undefined ? undefined : { table: options.collapseTable },
 	);
 	collapsed.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-	return { models: collapsed };
+	return { models: collapsed, rawModels: models };
 }
 
 /** Advertised image model and serving endpoint for one Antigravity account. */

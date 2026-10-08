@@ -545,13 +545,14 @@ export class CredentialSelector {
 		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
 		const planGate = strategy?.planGate?.(rankingContext);
 		const hasPlanRequirement = planGate !== undefined;
-		const accountIds = options?.accountIds?.length ? new Set(options.accountIds) : undefined;
+		const accountIds = options?.accountIds !== undefined ? new Set(options.accountIds) : undefined;
 		const enforceAccounts =
 			accountIds !== undefined &&
-			credentials.some(({ credential }) => {
-				const accountKey = oauthAccountKey(credential);
-				return accountKey !== undefined && accountIds.has(accountKey);
-			});
+			(options?.requireAccountIds === true ||
+				credentials.some(({ credential }) => {
+					const accountKey = oauthAccountKey(credential);
+					return accountKey !== undefined && accountIds.has(accountKey);
+				}));
 		const hasAccountPolicy = credentials.some(
 			({ credential }) => this.#deps.policies.forCredential(provider, credential) !== undefined,
 		);
@@ -880,7 +881,8 @@ export class CredentialSelector {
 			{ allowBlocked: true, enforcePlanRequirement, enforceAccounts },
 		];
 		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
-		if (enforceAccounts) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
+		if (enforceAccounts && !options?.requireAccountIds)
+			passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
 
 		for (const pass of passes) {
 			for (const candidate of candidates) {

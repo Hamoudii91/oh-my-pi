@@ -59,17 +59,19 @@ export function createApiKeyResolver(
 		forceRefresh: boolean | undefined,
 		signal?: AbortSignal,
 		refreshReason?: AuthApiKeyOptions["refreshReason"],
+		wireModelId?: string,
 	): Promise<ApiKeyResolution> =>
 		registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
 			baseUrl,
 			modelId,
+			wireModelId,
 			forceRefresh,
 			signal,
 			refreshReason,
 		});
-	return async ({ lastChance, error, signal, previousKey }) => {
+	return async ({ lastChance, error, signal, previousKey, wireModelId }) => {
 		if (error === undefined) {
-			return resolveKey(undefined);
+			return resolveKey(undefined, undefined, undefined, wireModelId);
 		}
 		if (lastChance) {
 			// Account constraint (401 / usage / account-rate-limit): rotate to a
@@ -92,9 +94,9 @@ export function createApiKeyResolver(
 				// auth decline can instead mean a peer refreshed the bearer.
 				if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 			}
-			const resolved = await resolveKey(undefined);
+			const resolved = await resolveKey(undefined, undefined, undefined, wireModelId);
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
-		return resolveKey(true, signal, AIError.status(error) === 401 ? "auth-recovery" : undefined);
+		return resolveKey(true, signal, AIError.status(error) === 401 ? "auth-recovery" : undefined, wireModelId);
 	};
 }

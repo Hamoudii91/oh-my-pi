@@ -1,11 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { Effort, type FetchImpl } from "@oh-my-pi/pi-ai";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import type { Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
 import { fetchAntigravityDiscoveryModels } from "@oh-my-pi/pi-catalog/discovery/antigravity";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { modelAccountRouting } from "@oh-my-pi/pi-catalog/provider-models/account-access";
 
 interface CapturedRequestBody {
 	model?: string;
@@ -105,22 +106,24 @@ function unroutedModel(): Model<"google-gemini-cli"> {
 async function captureRequest(
 	model: Model<"google-gemini-cli">,
 	reasoning: Effort | undefined,
-	options: { forceReasoningOff?: boolean } = {},
-): Promise<{ body: CapturedRequestBody; attributedModel: string }> {
+	options: { forceReasoningOff?: boolean; apiKey?: SimpleStreamOptions["apiKey"] } = {},
+): Promise<{ body: CapturedRequestBody; attributedModel: string; authorization: string | null }> {
 	let requestBody: string | undefined;
+	let authorization: string | null = null;
 	const fetchMock: FetchImpl = (_input, init) => {
 		requestBody = typeof init?.body === "string" ? init.body : undefined;
+		authorization = new Headers(init?.headers).get("authorization");
 		return Promise.resolve(new Response('{"error":{"message":"bad request"}}', { status: 400 }));
 	};
 	const stream = streamSimple(model, context, {
-		apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
+		apiKey: options.apiKey ?? JSON.stringify({ token: "token", projectId: "proj-123" }),
 		reasoning,
 		forceReasoningOff: options.forceReasoningOff,
 		fetch: fetchMock,
 	});
 	const result = await stream.result();
 	if (!requestBody) throw new Error("request body was not captured");
-	return { body: JSON.parse(requestBody) as CapturedRequestBody, attributedModel: result.model };
+	return { body: JSON.parse(requestBody) as CapturedRequestBody, attributedModel: result.model, authorization };
 }
 
 describe("google-gemini-cli effort-tier variant routing", () => {
@@ -196,6 +199,27 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 		const low = await captureRequest(collapsedFlashModel(), Effort.Low);
 		expect(low.body.model).toBe("gemini-3.5-flash-extra-low");
 		expect(low.body.request?.generationConfig?.thinkingConfig?.thinkingBudget).toBe(1000);
+	});
+
+	it("selects the bearer that serves the actual effort-tier wire model", async () => {
+		const model: Model<"google-gemini-cli"> = {
+			...collapsedFlashModel(),
+			accountAccess: {
+				"a@example.com": { wireModelIds: ["gemini-3.5-flash-extra-low"] },
+				"b@example.com": { wireModelIds: ["gemini-3-flash-agent"] },
+			},
+		};
+		const apiKey: SimpleStreamOptions["apiKey"] = async ({ wireModelId }) => {
+			const account = modelAccountRouting(model, wireModelId)?.accountIds[0];
+			return account ? JSON.stringify({ token: account, projectId: "proj-123" }) : undefined;
+		};
+		const high = await captureRequest(model, Effort.High, { apiKey });
+		expect(high.body.model).toBe("gemini-3-flash-agent");
+		expect(high.authorization).toBe("Bearer b@example.com");
+
+		const off = await captureRequest(model, Effort.High, { apiKey, forceReasoningOff: true });
+		expect(off.body.model).toBe("gemini-3.5-flash-extra-low");
+		expect(off.authorization).toBe("Bearer a@example.com");
 	});
 
 	it("suppresses thinking with a zero budget on the wire when off and suppressWhenOff is set", async () => {

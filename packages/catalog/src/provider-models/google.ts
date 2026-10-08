@@ -1,13 +1,13 @@
 import { logger } from "@oh-my-pi/pi-utils";
-import { reviewedCollapseTable } from "../compat/collapse";
+import { collapseVariants, reviewedCollapseTable } from "../compat/collapse";
 import { classifyModel } from "../compat/taxonomy";
 import { providerEntry } from "../compat/providers";
 import { fetchAntigravityDiscoveryModels } from "../discovery/antigravity";
 import { fetchGeminiModels } from "../discovery/gemini";
 import { fetchGeminiCliQuotaModels } from "../discovery/gemini-cli";
+import { THINKING_EFFORTS } from "../effort";
 import type { ModelManagerOptions } from "../model-manager";
-import type { FetchImpl, ModelSpec } from "../types";
-import { unionAccountCatalogs } from "./account-access";
+import type { FetchImpl, ModelAccountAccess, ModelSpec } from "../types";
 
 export interface GoogleModelManagerConfig {
 	apiKey?: string;
@@ -116,7 +116,8 @@ export function googleAntigravityModelManagerOptions(
 								}),
 							})),
 						);
-						const catalogs: { accountKey: string | undefined; models: ModelSpec<"google-gemini-cli">[] }[] = [];
+						const catalogs: { accountKey: string | undefined; availableIds: ReadonlySet<string> }[] = [];
+						const rawById = new Map<string, ModelSpec<"google-gemini-cli">>();
 						for (const { accountKey, result } of rosters) {
 							// A transient failure would leave the union partial; keep the previous catalog.
 							if (!result) return null;
@@ -127,17 +128,34 @@ export function googleAntigravityModelManagerOptions(
 								});
 								continue;
 							}
-							catalogs.push({ accountKey, models: result.models });
+							const availableIds = new Set<string>();
+							for (const model of result.rawModels) {
+								availableIds.add(model.id);
+								if (!rawById.has(model.id)) rawById.set(model.id, model);
+							}
+							catalogs.push({ accountKey, availableIds });
 						}
 						if (catalogs.length === 0) return null;
-						const tagAccess = catalogs.every(catalog => catalog.accountKey !== undefined);
-						return unionAccountCatalogs(
-							catalogs.map(({ accountKey, models }) =>
-								tagAccess && accountKey !== undefined
-									? models.map(model => ({ ...model, accountAccess: { [accountKey]: {} } }))
-									: models,
-							),
-						);
+						// Collapse after the union: collapsing each account first drops
+						// sibling-only effort routes from the shared logical model.
+						const models = collapseVariants([...rawById.values()]);
+						if (catalogs.some(catalog => catalog.accountKey === undefined)) return models;
+						return models.map(model => {
+							const routeIds = new Set<string>([model.requestModelId ?? model.id]);
+							const routes = model.thinking?.effortRouting;
+							if (routes?.off !== undefined) routeIds.add(routes.off);
+							for (const effort of THINKING_EFFORTS) {
+								const wireId = routes?.[effort];
+								if (wireId !== undefined) routeIds.add(wireId);
+							}
+							const accountAccess: Record<string, ModelAccountAccess> = {};
+							for (const { accountKey, availableIds } of catalogs) {
+								if (accountKey === undefined) continue;
+								const wireModelIds = [...routeIds].filter(id => availableIds.has(id));
+								if (wireModelIds.length > 0) accountAccess[accountKey] = { wireModelIds };
+							}
+							return { ...model, accountAccess };
+						});
 					},
 				}
 			: undefined),

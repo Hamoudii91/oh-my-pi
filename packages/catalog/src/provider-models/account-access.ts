@@ -1,4 +1,5 @@
-import type { Api, ModelSpec } from "../types";
+import { resolveWireModelId } from "../model-thinking";
+import type { Api, Model, ModelSpec } from "../types";
 
 /**
  * Merge per-account discovery catalogs into one list, deduped by model id.
@@ -27,4 +28,32 @@ export function unionAccountCatalogs<TApi extends Api>(
 		}
 	}
 	return [...byId.values()];
+}
+
+/**
+ * Accounts serving the selected upstream wire ID. Codex catalogs identify
+ * accounts by logical model alone; Antigravity catalogs also identify the
+ * individual effort-tier members, which must be enforced rather than tried
+ * on a sibling that cannot serve them.
+ */
+export function modelAccountRouting(
+	model: Model<Api>,
+	wireModelId?: string,
+): { accountIds: string[]; strict: boolean } | undefined {
+	const access = model.accountAccess;
+	if (access === undefined) return undefined;
+	let strict = false;
+	for (const accountId in access) {
+		if (access[accountId]?.wireModelIds !== undefined) {
+			strict = true;
+			break;
+		}
+	}
+	if (!strict) return { accountIds: Object.keys(access), strict: false };
+	const target = wireModelId ?? resolveWireModelId(model, undefined);
+	const accountIds: string[] = [];
+	for (const accountId in access) {
+		if (access[accountId]?.wireModelIds?.includes(target)) accountIds.push(accountId);
+	}
+	return { accountIds, strict: true };
 }

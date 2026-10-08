@@ -4,6 +4,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-ai";
+import { resolvedApiKeyBearer } from "@oh-my-pi/pi-ai/auth-retry";
+import type { OAuthCredential } from "@oh-my-pi/pi-ai/auth-storage";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -722,10 +724,14 @@ describe("ModelRegistry runtime discovery", () => {
 		await registry.refreshProvider("google-antigravity", "online");
 
 		const opus = registry.find("google-antigravity", "claude-opus-5-5");
-		expect(opus?.accountAccess).toEqual({ "b@example.com": {} });
+		expect(opus?.accountAccess).toEqual({
+			"b@example.com": {
+				wireModelIds: ["claude-opus-5-5-low", "claude-opus-5-5-medium", "claude-opus-5-5-high"],
+			},
+		});
 		expect(registry.find("google-antigravity", "gemini-3.1-pro")?.accountAccess).toEqual({
-			"a@example.com": {},
-			"b@example.com": {},
+			"a@example.com": { wireModelIds: ["gemini-3.1-pro-low"] },
+			"b@example.com": { wireModelIds: ["gemini-3.1-pro-low"] },
 		});
 		// Bundled rows that no account serves stay pruned.
 		expect(registry.find("google-antigravity", "claude-sonnet-5-5")).toBeUndefined();
@@ -736,6 +742,85 @@ describe("ModelRegistry runtime discovery", () => {
 		if (!accountA || !opus) throw new Error("expected account A and Claude Opus 5.5");
 		expect(authStorage.sessions.pin("google-antigravity", sessionId, accountA.credentialId)).toBe(true);
 		expect(await registry.getApiKey(opus, sessionId)).toContain('"token":"token-b"');
+	});
+
+	test("Antigravity effort tiers choose only accounts serving that wire model", async () => {
+		const accounts: OAuthCredential[] = [
+			{
+				type: "oauth",
+				access: "tier-a",
+				refresh: "refresh-tier-a",
+				expires: Date.now() + 3_600_000,
+				email: "tier-a@example.com",
+				projectId: "project-a",
+			},
+			{
+				type: "oauth",
+				access: "tier-b",
+				refresh: "refresh-tier-b",
+				expires: Date.now() + 3_600_000,
+				email: "tier-b@example.com",
+				projectId: "project-b",
+			},
+		];
+		await authStorage.credentials.set("google-antigravity", accounts);
+		const fetchMock: FetchImpl = async (input, init) => {
+			if (String(input).includes(":fetchAvailableModels")) {
+				const token = new Headers(init?.headers).get("authorization");
+				const tiers = token === "Bearer tier-a" ? ["low"] : ["medium", "high"];
+				return Response.json({
+					models: Object.fromEntries(tiers.map(tier => [`claude-opus-5-5-${tier}`, { supportsThinking: true }])),
+				});
+			}
+			return new Response("version: 2.19.1\n");
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refreshProvider("google-antigravity", "online");
+		const model = registry.find("google-antigravity", "claude-opus-5-5");
+		if (!model) throw new Error("missing merged Claude Opus 5.5");
+		expect(model.thinking?.effortRouting?.high).toBe("claude-opus-5-5-high");
+
+		const a = authStorage.oauth.accounts("google-antigravity")[0];
+		const b = authStorage.oauth.accounts("google-antigravity")[1];
+		if (!a || !b) throw new Error("missing test accounts");
+		expect(authStorage.sessions.pin("google-antigravity", "high-tier", a.credentialId)).toBe(true);
+		const highResolver = registry.resolver(model, "high-tier");
+		const high = await highResolver({
+			lastChance: false,
+			error: undefined,
+			wireModelId: "claude-opus-5-5-high",
+		});
+		expect(resolvedApiKeyBearer(high)).toContain('"token":"tier-b"');
+		expect(authStorage.sessions.pin("google-antigravity", "low-tier", b.credentialId)).toBe(true);
+		const lowResolver = registry.resolver(model, "low-tier");
+		const low = await lowResolver({
+			lastChance: false,
+			error: undefined,
+			wireModelId: "claude-opus-5-5-low",
+		});
+		expect(resolvedApiKeyBearer(low)).toContain('"token":"tier-a"');
+
+		// A temporarily blocked serving account must not redirect high to A's low-only plan.
+		await authStorage.limits.markReached("google-antigravity", "high-tier", {
+			apiKey: resolvedApiKeyBearer(high),
+			retryAfterMs: 60_000,
+		});
+		const blockedResolver = registry.resolver(model, "blocked-high");
+		const blocked = await blockedResolver({
+			lastChance: false,
+			error: undefined,
+			wireModelId: "claude-opus-5-5-high",
+		});
+		expect(resolvedApiKeyBearer(blocked)).toContain('"token":"tier-b"');
+
+		await authStorage.credentials.set("google-antigravity", [accounts[0]]);
+		const unavailableResolver = registry.resolver(model, "unavailable-tier");
+		const unavailable = await unavailableResolver({
+			lastChance: false,
+			error: undefined,
+			wireModelId: "claude-opus-5-5-high",
+		});
+		expect(unavailable).toBeUndefined();
 	});
 
 	test("Gemini CLI discovery forwards a stored OAuth project id to the quota fallback", async () => {

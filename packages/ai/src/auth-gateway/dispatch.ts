@@ -7,6 +7,7 @@
  * Everything credential-shaped lives here so each route drives the same
  * broker-backed rotation policy and the same usage ledger.
  */
+import { modelAccountRouting } from "@oh-my-pi/pi-catalog/provider-models/account-access";
 import { extractHttpStatusFromError, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver, ResolvedApiKey } from "../auth-retry";
 import type { AuthApiKeyOptions, AuthStorage } from "../auth-storage";
@@ -95,10 +96,15 @@ export async function resolveGatewayApiKey(
 	sessionId: string,
 	signal: AbortSignal,
 	peer: string,
+	wireModelId?: string,
 ): Promise<ResolvedApiKey | GatewayErrorClassification> {
 	let apiKey: ResolvedApiKey | undefined;
 	try {
-		apiKey = await storage.keys.getWithCredential(model.provider, sessionId, modelKeyOptions(model, signal));
+		apiKey = await storage.keys.getWithCredential(
+			model.provider,
+			sessionId,
+			modelKeyOptions(model, signal, wireModelId),
+		);
 	} catch (error) {
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
@@ -144,6 +150,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 	signal: AbortSignal,
 	format: string,
 	peer: string,
+	wireModelId?: string,
 ): Promise<ResolvedApiKey | undefined> {
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);
@@ -167,7 +174,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 			error: message,
 		});
 		if (!switched) return undefined;
-		return storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal));
+		return storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal, wireModelId));
 	}
 	await storage.limits.invalidateMatching(provider, oldKey, { sessionId, signal });
 	logger.debug("auth-gateway retrying provider request after credential invalidation", {
@@ -176,12 +183,13 @@ async function refreshGatewayApiKeyAfterAuthError(
 		peer,
 		error: message,
 	});
-	return storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal));
+	return storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal, wireModelId));
 }
 
-/** Model-scoped key options: usage ranking by model id, routing to accounts discovery saw serve it. */
-function modelKeyOptions(model: Model<Api>, signal: AbortSignal): AuthApiKeyOptions {
-	return { modelId: model.id, accountIds: model.accountAccess && Object.keys(model.accountAccess), signal };
+/** Model-scoped key options: usage ranking by logical model, selection by served wire model. */
+function modelKeyOptions(model: Model<Api>, signal: AbortSignal, wireModelId?: string): AuthApiKeyOptions {
+	const routing = modelAccountRouting(model, wireModelId);
+	return { modelId: model.id, accountIds: routing?.accountIds, requireAccountIds: routing?.strict, signal };
 }
 
 /**
@@ -208,9 +216,10 @@ export function buildGatewayApiKeyResolver(
 	format: string,
 	peer: string,
 	onResolvedKey?: (apiKey: string) => void,
+	wireModelId?: string,
 ): ApiKeyResolver {
 	let lastKey = initialKey.apiKey;
-	return async ({ lastChance, error, signal }) => {
+	return async ({ lastChance, error, signal, wireModelId: requestedWireModelId }) => {
 		const sig = signal ?? requestSignal;
 		if (error === undefined) {
 			lastKey = initialKey.apiKey;
@@ -218,7 +227,7 @@ export function buildGatewayApiKeyResolver(
 		}
 		if (!lastChance) {
 			const refreshed = await storage.keys.getWithCredential(model.provider, sessionId, {
-				...modelKeyOptions(model, sig),
+				...modelKeyOptions(model, sig, requestedWireModelId ?? wireModelId),
 				forceRefresh: true,
 				refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
 			});
@@ -236,6 +245,7 @@ export function buildGatewayApiKeyResolver(
 			sig,
 			format,
 			peer,
+			requestedWireModelId ?? wireModelId,
 		);
 		lastKey = next?.apiKey ?? lastKey;
 		if (next) onResolvedKey?.(next.apiKey);

@@ -32,6 +32,8 @@ export interface ApiKeyResolveContext {
 	previousKey?: string;
 	/** Caller cancel signal, threaded into any credential refresh / rotation work. */
 	signal?: AbortSignal;
+	/** Upstream wire ID selected for this request, used when accounts serve different effort tiers. */
+	wireModelId?: string;
 }
 
 /**
