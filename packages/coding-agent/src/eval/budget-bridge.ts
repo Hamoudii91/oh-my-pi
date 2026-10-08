@@ -35,11 +35,15 @@ interface ResolvedEvalBudget {
 	source: "turn" | "goal" | null;
 }
 
-function resolveEvalBudget(session: ToolSession): ResolvedEvalBudget {
+async function resolveEvalBudget(session: ToolSession): Promise<ResolvedEvalBudget> {
 	const turn = session.getTurnBudget?.();
 	if (turn && turn.total !== null) {
 		return { budget: { total: turn.total, spent: turn.spent, hard: turn.hard }, source: "turn" };
 	}
+	// `goal.tokensUsed` only advances on `tool_execution_end`, so mid-cell it lags the usage of the
+	// assistant request that invoked eval. Flush first; "allowed" keeps the budget-limit steer, which
+	// the post-tool flush would otherwise skip because this flush already consumed the delta.
+	await session.getGoalRuntime?.()?.flushUsage("allowed");
 	const goal = session.getGoalModeState?.();
 	if (goal?.enabled && goal.goal) {
 		const total = goal.goal.tokenBudget ?? null;
@@ -58,7 +62,7 @@ function resolveEvalBudget(session: ToolSession): ResolvedEvalBudget {
  * helpers read `.total`/`.spent`/`.hard` directly.
  */
 export async function runEvalBudget(_args: unknown, options: EvalBudgetBridgeOptions): Promise<EvalBudgetResult> {
-	return resolveEvalBudget(options.session).budget;
+	return (await resolveEvalBudget(options.session)).budget;
 }
 
 /**
@@ -67,8 +71,8 @@ export async function runEvalBudget(_args: unknown, options: EvalBudgetBridgeOpt
  * @throws {ToolError} when the resolved ceiling is hard and `spent >= total`,
  * naming the `+Nk!` directive or the Goal Mode budget that imposed it.
  */
-export function assertEvalSpawnBudget(session: ToolSession): void {
-	const { budget, source } = resolveEvalBudget(session);
+export async function assertEvalSpawnBudget(session: ToolSession): Promise<void> {
+	const { budget, source } = await resolveEvalBudget(session);
 	if (!budget.hard || budget.total === null || budget.spent < budget.total) return;
 	if (source === "goal") {
 		throw new ToolError(

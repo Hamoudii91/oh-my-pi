@@ -14,6 +14,8 @@ import * as taskExecutor from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
+import type { GoalModeState, GoalTokenUsage } from "@oh-my-pi/pi-coding-agent/goals/state";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
@@ -206,6 +208,56 @@ describe("runEvalAgent", () => {
 			expect(blocked).toBe(error !== spawnRefusal);
 			await expect(runEvalAgent({ prompt: "local", agent: "task" }, { session })).rejects.toThrow(error);
 		}
+	});
+
+	it("counts the in-flight assistant request toward the goal budget before admitting agent()", async () => {
+		let state: GoalModeState | undefined = {
+			enabled: true,
+			mode: "active",
+			goal: {
+				id: "goal-1",
+				objective: "ship",
+				status: "active",
+				tokenBudget: 100,
+				tokensUsed: 90,
+				timeUsedSeconds: 0,
+				createdAt: 0,
+				updatedAt: 0,
+			},
+		};
+		let usage: GoalTokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+		const steers: string[] = [];
+		const runtime = new GoalRuntime({
+			getState: () => state && { ...state, goal: { ...state.goal } },
+			setState: next => {
+				state = next && { ...next, goal: { ...next.goal } };
+			},
+			getCurrentUsage: () => ({ ...usage }),
+			emit: () => {},
+			persist: () => {},
+			sendHiddenMessage: async message => {
+				steers.push(message.customType);
+			},
+			now: () => 0,
+		});
+		runtime.onTurnStart("turn-1", usage);
+		// The assistant request that invoked eval has landed; its tool call has not completed yet.
+		usage = { ...usage, output: 10 };
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.beginTurnBudget(null, false);
+		const session = {
+			...createBudgetSession(sessionManager),
+			getSessionSpawns: () => "",
+			getGoalRuntime: () => runtime,
+			getGoalModeState: () => state,
+		} as unknown as ToolSession;
+
+		await expect(runEvalAgent({ prompt: "local", agent: "task" }, { session })).rejects.toThrow(
+			"Goal Mode token budget exhausted (100/100 tokens)",
+		);
+		// The budget-limit steer fires once, not lost to the post-tool flush and not duplicated by it.
+		await runtime.onToolCompleted("eval");
+		expect(steers).toEqual(["goal-budget-limit"]);
 	});
 
 	it("does not route ordinary task subagents through the eval budget accumulator", async () => {

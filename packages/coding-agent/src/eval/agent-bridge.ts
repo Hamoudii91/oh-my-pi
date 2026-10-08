@@ -169,7 +169,7 @@ async function buildEvalAgentResult(execution: StructuredSubagentResult): Promis
 /** Register a background subagent and return its handle immediately. */
 export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentHandleResult> {
 	const parsed = parseAgentArgs(args);
-	assertEvalSpawnBudget(options.session);
+	await assertEvalSpawnBudget(options.session);
 	if (parsed.tools?.length && options.session.getPlanModeState?.()?.enabled === true) {
 		throw new ToolError("Eval-defined tools are unavailable in plan mode.");
 	}
