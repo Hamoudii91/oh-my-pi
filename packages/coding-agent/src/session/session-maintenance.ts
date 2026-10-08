@@ -32,6 +32,7 @@ import {
 	invalidateMessageCache,
 	isTranscriptUsageAnchor,
 	NativeCompactionError,
+	type OpenAiV2RequestPreparation,
 	prepareCompaction,
 	RESCUE_SHAKE_CONFIG,
 	remotePreserveReusable,
@@ -458,13 +459,14 @@ export interface SessionMaintenanceHost {
 		signal?: AbortSignal,
 	): Promise<Context>;
 	obfuscateTextForProvider(text: string | undefined): string | undefined;
-	/** Builds an OpenAI native-compaction context from a pinned ordinary request projection. */
-	buildOpenAiV2Context(
+	/** Prepares an OpenAI native-compaction request from a pinned ordinary request projection. */
+	prepareOpenAiV2Request(
 		messages: AgentMessage[],
+		retained: AgentMessage[],
 		model: Model,
 		projection: PreparedProviderProjection | undefined,
 		signal?: AbortSignal,
-	): Promise<Context | undefined>;
+	): Promise<OpenAiV2RequestPreparation | undefined>;
 	obfuscatePreparationForProvider(preparation: CompactionPreparation): CompactionPreparation;
 	closeCodexProviderSessionsForHistoryRewrite(): void;
 	resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void;
@@ -2262,8 +2264,8 @@ export class SessionMaintenance {
 					promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 					extraContext: compactionPrep.hookContext,
 					remoteSystemPrompt: this.#host.agent.state.systemPrompt,
-					buildOpenAiV2Context: (messages, candidate, requestSignal) =>
-						this.#host.buildOpenAiV2Context(messages, candidate, projection, requestSignal),
+					prepareOpenAiV2Request: (messages, retained, candidate, requestSignal) =>
+						this.#host.prepareOpenAiV2Request(messages, retained, candidate, projection, requestSignal),
 					codexCompaction,
 					// Isolate from the live turn: remote compaction transports key
 					// sticky provider sessions by sessionId, and a speculation
@@ -3479,10 +3481,10 @@ export class SessionMaintenance {
 						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 						buildProviderContext: (summarized, retained, signal) =>
 							this.#host.buildLiveProviderContext(summarized, retained, signal),
-						buildOpenAiV2Context:
-							options?.buildOpenAiV2Context ??
-							((messages, requestModel, requestSignal) =>
-								this.#host.buildOpenAiV2Context(messages, requestModel, projection, requestSignal)),
+						prepareOpenAiV2Request:
+							options?.prepareOpenAiV2Request ??
+							((messages, retained, requestModel, requestSignal) =>
+								this.#host.prepareOpenAiV2Request(messages, retained, requestModel, projection, requestSignal)),
 						isUserAuthored: isUserAuthoredMessage,
 						telemetry,
 						// Honor the user's /model thinking selection (incl. `off`) on
@@ -4922,8 +4924,14 @@ export class SessionMaintenance {
 									convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 									buildProviderContext: (summarized, retained, signal) =>
 										this.#host.buildLiveProviderContext(summarized, retained, signal),
-									buildOpenAiV2Context: (messages, requestModel, requestSignal) =>
-										this.#host.buildOpenAiV2Context(messages, requestModel, projection, requestSignal),
+									prepareOpenAiV2Request: (messages, retained, requestModel, requestSignal) =>
+										this.#host.prepareOpenAiV2Request(
+											messages,
+											retained,
+											requestModel,
+											projection,
+											requestSignal,
+										),
 									isUserAuthored: isUserAuthoredMessage,
 									telemetry,
 									// Honor the user's /model thinking selection on the

@@ -24,12 +24,34 @@ function messageStartsWithReminder(message: UserMessage, reminder: string): bool
 	return message.content[0]?.type === "text" && message.content[0].text === reminder;
 }
 
+/** Source turn of an injected copy; non-enumerable so later spreads do not inherit it. */
+const kReminderSource = Symbol("dateCwdReminder.source");
+
+interface ReminderInjectedMessage extends UserMessage {
+	[kReminderSource]?: UserMessage;
+}
+
 function injectReminder(message: UserMessage, reminder: string): UserMessage {
 	const content: UserMessage["content"] =
 		typeof message.content === "string"
 			? `${reminder}\n\n${message.content}`
 			: [{ type: "text", text: reminder }, ...message.content];
-	return { ...message, content };
+	const injected: ReminderInjectedMessage = { ...message, content };
+	Object.defineProperty(injected, kReminderSource, { value: message });
+	return injected;
+}
+
+/**
+ * The message a {@link DateCwdReminderInjector} prepended its reminder to, or
+ * `message` itself. Used where a prepared turn is persisted, so the volatile
+ * reminder does not become part of stored history.
+ */
+export function withoutDateCwdReminder(message: Message): Message {
+	return isReminderInjected(message) ? message[kReminderSource] : message;
+}
+
+function isReminderInjected(message: Message): message is Required<ReminderInjectedMessage> {
+	return message.role === "user" && kReminderSource in message;
 }
 
 /** Developer turns the injector inserted; every other output message maps to an input one. */

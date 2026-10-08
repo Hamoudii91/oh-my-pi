@@ -6,7 +6,8 @@ import {
 	type AgentMessage,
 	type PreparedProviderProjection,
 } from "@oh-my-pi/pi-agent-core";
-import type { CompactionPreparation } from "@oh-my-pi/pi-agent-core/compaction";
+import { isDateCwdReminderControl, withoutDateCwdReminder } from "./date-cwd-reminder";
+import type { CompactionPreparation, OpenAiV2RequestPreparation } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	AssistantMessage,
 	Context,
@@ -211,14 +212,58 @@ export class SessionProviderBoundary {
 		const transformedMessages = await this.#host.transformContext(messages, signal);
 		return await this.#host.convertToLlm(transformedMessages);
 	}
-	/** Reuses the completed live projection when its source is a prefix of the compaction history. */
-	async buildOpenAiV2Context(
+
+	/**
+	 * Prepares a native V2 compaction request as an ordinary turn would send it,
+	 * reusing the completed live projection when its source is a prefix of
+	 * `messages`, and maps the `retained` user turns to their prepared form.
+	 */
+	async prepareOpenAiV2Request(
+		messages: AgentMessage[],
+		retained: AgentMessage[],
+		model: Model,
+		projection: PreparedProviderProjection | undefined,
+		signal?: AbortSignal,
+	): Promise<OpenAiV2RequestPreparation | undefined> {
+		if (!modelsAreEqual(model, this.#host.agent.state.model)) return undefined;
+		const { input, context } = await this.#prepareOpenAiV2Context(messages, model, projection, signal);
+		// Provider transforms rewrite messages in place and insert only reminder
+		// controls, so outputs pair with inputs by position once those are skipped.
+		const prepared = new Map<Message, Message>();
+		let next = 0;
+		for (const message of context.messages) {
+			if (isDateCwdReminderControl(message)) continue;
+			const source = input[next++];
+			if (source) prepared.set(source, withoutDateCwdReminder(message));
+		}
+		if (next !== input.length) prepared.clear();
+		// Conversion is memoized per message, so an untouched turn maps by identity;
+		// a turn `transformContext` rewrote (e.g. steering) maps by its unique timestamp.
+		const usersByTimestamp = new Map<number, Message[]>();
+		for (const item of input) {
+			if (item.role !== "user") continue;
+			const bucket = usersByTimestamp.get(item.timestamp);
+			if (bucket) bucket.push(item);
+			else usersByTimestamp.set(item.timestamp, [item]);
+		}
+		const retainedMessages: Message[] = [];
+		for (const message of retained) {
+			const [converted] = await this.#host.convertToLlm([message]);
+			const byTimestamp = usersByTimestamp.get(message.timestamp);
+			const source =
+				converted && prepared.has(converted) ? converted : byTimestamp?.length === 1 ? byTimestamp[0] : undefined;
+			const preparedMessage = source && prepared.get(source);
+			retainedMessages.push(...(preparedMessage ? [preparedMessage] : this.convertToLlmForSideRequest([message])));
+		}
+		return { context, retained: retainedMessages };
+	}
+
+	async #prepareOpenAiV2Context(
 		messages: AgentMessage[],
 		model: Model,
 		projection: PreparedProviderProjection | undefined,
 		signal?: AbortSignal,
-	): Promise<Context | undefined> {
-		if (!modelsAreEqual(model, this.#host.agent.state.model)) return undefined;
+	): Promise<{ input: Message[]; context: Context }> {
 		if (projection && modelsAreEqual(model, projection.model) && projection.sourceLength <= messages.length) {
 			let shared = true;
 			for (let index = 0; index < projection.sourceLength; index++) {
@@ -238,7 +283,9 @@ export class SessionProviderBoundary {
 				}
 			}
 			if (shared) {
-				if (projection.sourceLength === messages.length) return projection.context;
+				if (projection.sourceLength === messages.length) {
+					return { input: projection.input.messages, context: projection.context };
+				}
 				// The pinned prefix keeps the stateful `transformContext` output it was
 				// sent with; only the provider transforms (images, snapcompact,
 				// reminders, secrets) rerun, over the whole request as the next live
@@ -246,10 +293,11 @@ export class SessionProviderBoundary {
 				// are the ones the live turn transformed, so identity-keyed transform
 				// state is unchanged.
 				const tail = await this.#host.convertToLlm(messages.slice(projection.sourceLength));
-				return this.#host.agent.transformSideRequestContext({
-					...projection.input,
-					messages: [...projection.input.messages, ...normalizeMessagesForProvider(tail, model)],
-				});
+				const input = [...projection.input.messages, ...normalizeMessagesForProvider(tail, model)];
+				return {
+					input,
+					context: await this.#host.agent.transformSideRequestContext({ ...projection.input, messages: input }),
+				};
 			}
 		}
 		// Rebuild from the live summary object, as live turns do: conversion caches
@@ -263,7 +311,8 @@ export class SessionProviderBoundary {
 				? [liveSummary, ...messages.slice(1)]
 				: messages;
 		const transformed = await this.#host.transformContext(history, signal);
-		return this.#host.agent.buildSideRequestContext(this.convertToLlmForSideRequest(transformed));
+		const input = normalizeMessagesForProvider(this.convertToLlmForSideRequest(transformed), model);
+		return { input, context: await this.#host.agent.buildSideRequestContext(input) };
 	}
 
 	/** Applies session-level stream hooks and provider defaults to a side request. */

@@ -2498,9 +2498,9 @@ describe("compact() remote compaction failure handling", () => {
 		let bodyText = "";
 		let projections = 0;
 		await compact(preparation, model, "test-key", undefined, undefined, {
-			buildOpenAiV2Context: async () => {
+			prepareOpenAiV2Request: async () => {
 				projections++;
-				return context;
+				return { context, retained: [] };
 			},
 			fetch: async (_input, init) => {
 				bodyText = String(init?.body);

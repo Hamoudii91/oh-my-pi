@@ -668,6 +668,18 @@ function shouldRetryHandoffWithAutoToolChoice(response: AssistantMessage): boole
 	return /\btool_choice\b/i.test(message) && /\bauto\b/i.test(message) && /\bsupported\b/i.test(message);
 }
 
+/** Provider-prepared parts of an OpenAI Responses V2 compaction request. */
+export interface OpenAiV2RequestPreparation {
+	/** Request context as an ordinary turn over the same history would send it. */
+	context: Context;
+	/**
+	 * The retained user-authored turns as that request prepared them (images
+	 * rewritten, secrets obfuscated, without the volatile date/cwd reminder), so
+	 * replacement history replays what the provider accepted.
+	 */
+	retained: Message[];
+}
+
 /**
  * Generate a summary of the conversation using the LLM.
  * If previousSummary is provided, uses the update prompt to merge.
@@ -693,16 +705,18 @@ export interface SummaryOptions {
 		signal?: AbortSignal,
 	) => Promise<Context>;
 	/**
-	 * Provider projection for the full V2 history, including new messages after the
-	 * shared prefix. When native history exists, `messages` leads with the previous
-	 * compaction summary carrying it, as the live context does, so the returned
-	 * context replays that history in place of the separately stored copy.
+	 * Provider preparation for a V2 request: the full history, including new
+	 * messages after the shared prefix, and the user-authored turns retained in
+	 * replacement history. When native history exists, `messages` leads with the
+	 * previous compaction summary carrying it, as the live context does, so the
+	 * returned context replays that history in place of the separately stored copy.
 	 */
-	buildOpenAiV2Context?: (
+	prepareOpenAiV2Request?: (
 		messages: AgentMessage[],
+		retained: AgentMessage[],
 		model: Model,
 		signal?: AbortSignal,
-	) => Promise<Context | undefined>;
+	) => Promise<OpenAiV2RequestPreparation | undefined>;
 	/**
 	 * Whether a message is a turn the user wrote. Remote Compaction V2 keeps these
 	 * next to the compaction item. Defaults to `role === "user"`; hosts whose
@@ -1661,7 +1675,7 @@ export async function compact(
 		metadata: options?.metadata,
 		convertToLlm: options?.convertToLlm,
 		buildProviderContext: options?.buildProviderContext,
-		buildOpenAiV2Context: options?.buildOpenAiV2Context,
+		prepareOpenAiV2Request: options?.prepareOpenAiV2Request,
 		isUserAuthored: options?.isUserAuthored,
 		telemetry: options?.telemetry,
 		// Honor /model thinking selection on every fan-out summarizer.
@@ -1730,7 +1744,7 @@ export async function compact(
 		// The live context leads with the previous native summary; give the
 		// projection the same head so it can match and replay it in place.
 		const previousNativeSummary =
-			previousReplacementHistory && summaryOptions.buildOpenAiV2Context
+			previousReplacementHistory && summaryOptions.prepareOpenAiV2Request
 				? createCompactionSummaryMessage(
 						previousSummary ?? "",
 						tokensBefore,
@@ -1744,27 +1758,28 @@ export async function compact(
 						},
 					)
 				: undefined;
-		const liveContext = !isCodexResponsesModel(model)
-			? await summaryOptions.buildOpenAiV2Context?.(
+		// Replacement history keeps what the user wrote. Summaries, archive
+		// migrations, and custom/hook messages can serialize as user-role items
+		// too, so pick the user's own messages before serialization erases that,
+		// then serialize each one exactly as the request does.
+		const isUserAuthored = summaryOptions.isUserAuthored ?? ((message: AgentMessage) => message.role === "user");
+		const retainedSources = [...messagesToSummarize, ...turnPrefixMessages, ...recentMessages].filter(isUserAuthored);
+		const prepared = !isCodexResponsesModel(model)
+			? await summaryOptions.prepareOpenAiV2Request?.(
 					previousNativeSummary ? [previousNativeSummary, ...remoteMessages] : remoteMessages,
+					retainedSources,
 					model,
 					signal,
 				)
 			: undefined;
+		const liveContext = prepared?.context;
 		const messages = liveContext?.messages ?? convertToLlm(remoteMessages);
 		const inlineSystemPrompt =
 			liveContext?.systemPrompt &&
 			resolveOpenAICompatPolicy(model, { endpoint: "responses" }).messages.systemRole === "developer"
 				? normalizeSystemPrompts(liveContext.systemPrompt)
 				: undefined;
-		// Replacement history keeps what the user wrote. Summaries, archive
-		// migrations, and custom/hook messages can serialize as user-role items
-		// too, so pick the user's own messages before serialization erases that,
-		// then serialize each one exactly as the request does.
-		const isUserAuthored = summaryOptions.isUserAuthored ?? ((message: AgentMessage) => message.role === "user");
-		const userMessages = convertToLlm(
-			[...messagesToSummarize, ...turnPrefixMessages, ...recentMessages].filter(isUserAuthored),
-		);
+		const userMessages = prepared?.retained ?? convertToLlm(retainedSources);
 		const retainedUserItems: unknown[] = [...(previousReplacementHistory ?? [])];
 		const remoteSystemPrompt = summaryOptions.remoteSystemPrompt ?? [SUMMARIZATION_SYSTEM_PROMPT];
 		let codexBody: OpenAICodexCompactionBody | undefined;
