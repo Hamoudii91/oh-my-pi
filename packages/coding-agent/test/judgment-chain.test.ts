@@ -277,6 +277,49 @@ describe("ChainJudge", () => {
 		);
 	});
 
+	it("falls back immediately on a long Retry-After and skips the rate-limited judge until it expires", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": { judge: [`${DECISIONS.provider}/${DECISIONS.id}`] },
+		});
+		const registry = makeRegistry([JEV_PREVIEW, DECISIONS], { typesafe: "ts-key", openrouter: "or-key" });
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				if (String(url).endsWith("/v1/systemone")) {
+					return new Response('{"error":{"type":"FreeUsageLimitError"}}', {
+						status: 429,
+						headers: { "retry-after": "34003" },
+					});
+				}
+				return Response.json({
+					model: "jev-1.13.0",
+					answers: { level: { type: "choice", choice: "high" } },
+					usage: { input_tokens: 8, output_tokens: 2 },
+				});
+			}),
+		);
+		const request = { state: "redesign the scheduler", questions: { level: TIER_QUESTION } };
+		const startedAt = Date.now();
+
+		await new ChainJudge({ settings, registry, purpose: "find" }).judge(request);
+		const second = await new ChainJudge({ settings, registry, purpose: "find" }).judge(request);
+
+		expect(second.answers.level.choice).toBe("high");
+		expect(Date.now() - startedAt).toBeLessThan(1_000);
+		expect(urls).toEqual([
+			"https://judge.example.test/v1/systemone",
+			"https://decisions.example.test/decisions",
+			"https://decisions.example.test/decisions",
+		]);
+
+		const later = vi.spyOn(Date, "now").mockReturnValue(startedAt + 34_004_000);
+		await new ChainJudge({ settings, registry, purpose: "find" }).judge(request);
+		later.mockRestore();
+		expect(urls[3]).toBe("https://judge.example.test/v1/systemone");
+	});
+
 	it("propagates caller abort without attempting a fallback", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: `${ONLINE.provider}/${ONLINE.id}` },

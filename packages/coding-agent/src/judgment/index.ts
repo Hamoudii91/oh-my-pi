@@ -38,6 +38,7 @@ import {
 	type Usage,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
@@ -131,7 +132,8 @@ const LOCAL_REASONING_MAX_TOKENS = 1024;
  * How long a candidate stays skipped after its account rejected a judgment
  * outright (401/403 credential, 402 billing cap). Every judgment rebuilds the
  * chain, so without this each call re-pays the rejected request plus a
- * credential-rotation round trip before reaching the next candidate.
+ * credential-rotation round trip before reaching the next candidate. A rate
+ * limit (429) is skipped for its advertised `retry-after` instead.
  */
 const CANDIDATE_REJECTION_COOLDOWN_MS = 5 * 60 * 1000;
 /**
@@ -142,12 +144,17 @@ const CANDIDATE_REJECTION_COOLDOWN_MS = 5 * 60 * 1000;
  * per-call consumers (auto-thinking, subagent starts) resolve a fresh judge.
  */
 const CANDIDATE_TTL_MS = 1_000;
-/** Skip-until timestamps keyed by routed model identity, carried by the registry that produced the rejection. */
+/** Skipped candidates keyed by routed model identity, carried by the registry that produced the failure. */
 const kRejections = Symbol("judgment.rejections");
 /** Last resolved judge role chain, carried by the registry it was drawn from. */
 const kRoleChain = Symbol("judgment.roleChain");
+/** A candidate skipped until `until` (epoch ms); `reason` completes "<identity> …" in the chain's failure message. */
+interface Cooldown {
+	until: number;
+	reason: string;
+}
 interface RegistryWithRejections extends ModelRegistry {
-	[kRejections]?: Map<string, number>;
+	[kRejections]?: Map<string, Cooldown>;
 	[kRoleChain]?: { settings: Settings; list: RoleChainCandidate[]; expiresAt: number };
 }
 
@@ -256,10 +263,10 @@ export class ChainJudge implements Judge {
 				throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
 			}
 			const identity = formatModelStringWithRouting(candidate.model);
-			const skippedUntil = rejections.get(identity);
-			if (skippedUntil !== undefined) {
-				if (skippedUntil > Date.now()) {
-					lastUnavailable = `${identity} rejected the account recently`;
+			const skipped = rejections.get(identity);
+			if (skipped !== undefined) {
+				if (skipped.until > Date.now()) {
+					lastUnavailable = `${identity} ${skipped.reason}`;
 					continue;
 				}
 				rejections.delete(identity);
@@ -276,14 +283,14 @@ export class ChainJudge implements Judge {
 					throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
 				}
 				if (isAbortOrTimeout(error)) throw error;
-				const rejected = isAccountRejection(error);
-				if (rejected) rejections.set(identity, Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS);
+				const cooldown = cooldownOf(error);
+				if (cooldown) rejections.set(identity, { until: Date.now() + cooldown.ms, reason: cooldown.reason });
 				lastFailure = error instanceof Error ? error.message : String(error);
 				logger.warn("judgment candidate failed", {
 					candidate: identity,
 					status: AIError.status(error),
 					error: lastFailure,
-					skippedForMs: rejected ? CANDIDATE_REJECTION_COOLDOWN_MS : undefined,
+					skippedForMs: cooldown?.ms,
 				});
 			}
 		}
@@ -310,7 +317,7 @@ export class ChainJudge implements Judge {
 		}).catch(error => logger.warn("judgment telemetry failed", { error: String(error) }));
 	}
 
-	#rejections(): Map<string, number> {
+	#rejections(): Map<string, Cooldown> {
 		const registry: RegistryWithRejections = this.#deps.registry;
 		return (registry[kRejections] ??= new Map());
 	}
@@ -471,10 +478,20 @@ function nativeJudge(
 	};
 }
 
-/** Credential or billing rejection: the account cannot serve this candidate until something changes out of band. */
-function isAccountRejection(error: unknown): boolean {
+/**
+ * How long, and why, a failed candidate is skipped by later judgments: an
+ * account rejection (401/403 credential, 402 billing cap) until something
+ * changes out of band, a rate limit (429) until its advertised `retry-after`
+ * expires. Other failures are not remembered.
+ */
+function cooldownOf(error: unknown): { ms: number; reason: string } | undefined {
 	const status = AIError.status(error);
-	return status === 401 || status === 402 || status === 403;
+	if (status === 401 || status === 402 || status === 403) {
+		return { ms: CANDIDATE_REJECTION_COOLDOWN_MS, reason: "rejected the account recently" };
+	}
+	if (status !== 429) return undefined;
+	const retryAfterMs = getRetryAfterMsFromHeaders(getHeadersFromError(error));
+	return retryAfterMs === undefined ? undefined : { ms: retryAfterMs, reason: "is rate-limited" };
 }
 
 function isAbortOrTimeout(error: unknown): boolean {
