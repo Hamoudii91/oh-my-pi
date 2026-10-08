@@ -40,10 +40,10 @@ async function resolveEvalBudget(session: ToolSession): Promise<ResolvedEvalBudg
 	if (turn && turn.total !== null) {
 		return { budget: { total: turn.total, spent: turn.spent, hard: turn.hard }, source: "turn" };
 	}
-	// `goal.tokensUsed` only advances on `tool_execution_end`, so mid-cell it lags the usage of the
-	// assistant request that invoked eval. Flush first; "allowed" keeps the budget-limit steer, which
-	// the post-tool flush would otherwise skip because this flush already consumed the delta.
-	await session.getGoalRuntime?.()?.flushUsage("allowed");
+	// `goal.tokensUsed` lags the assistant request invoking eval until `tool_execution_end`.
+	// Account for it now, but delay the budget-limit steer until the eval tool completes:
+	// a mid-cell steer would background the running cell.
+	await session.getGoalRuntime?.()?.flushUsage("deferred");
 	const goal = session.getGoalModeState?.();
 	if (goal?.enabled && goal.goal) {
 		const total = goal.goal.tokenBudget ?? null;

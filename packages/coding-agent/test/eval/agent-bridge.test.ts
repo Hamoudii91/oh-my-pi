@@ -252,10 +252,17 @@ describe("runEvalAgent", () => {
 			getGoalModeState: () => state,
 		} as unknown as ToolSession;
 
+		expect(await runEvalBudget({}, { session })).toEqual({ total: 100, spent: 100, hard: true });
+		expect(steers).toEqual([]);
 		await expect(runEvalAgent({ prompt: "local", agent: "task" }, { session })).rejects.toThrow(
 			"Goal Mode token budget exhausted (100/100 tokens)",
 		);
-		// The budget-limit steer fires once, not lost to the post-tool flush and not duplicated by it.
+		expect(steers).toEqual([]);
+		// Another tool can finish concurrently; only the eval boundary delivers its deferred steer.
+		await runtime.onToolCompleted("read");
+		expect(steers).toEqual([]);
+		await runtime.onToolCompleted("eval");
+		expect(steers).toEqual(["goal-budget-limit"]);
 		await runtime.onToolCompleted("eval");
 		expect(steers).toEqual(["goal-budget-limit"]);
 	});
