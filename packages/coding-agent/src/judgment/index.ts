@@ -19,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import {
 	type Answer,
+	type ApiKeyResolver,
 	type AssistantMessage,
 	chatTextBackend,
 	isJudgmentApi,
@@ -271,8 +272,11 @@ export class ChainJudge implements Judge {
 				}
 				rejections.delete(identity);
 			}
+			// Every failure `withAuth` rotated away from, so a rate limit cools the
+			// candidate only until its soonest-recovering credential is usable.
+			const rotatedFrom: unknown[] = [];
 			try {
-				const judge = await this.#createJudge(candidate, signal);
+				const judge = await this.#createJudge(candidate, rotatedFrom, signal);
 				if (!judge) {
 					lastUnavailable = `no API key for ${candidate.model.provider}/${candidate.model.id}`;
 					continue;
@@ -283,7 +287,7 @@ export class ChainJudge implements Judge {
 					throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
 				}
 				if (isAbortOrTimeout(error)) throw error;
-				const cooldown = cooldownOf(error);
+				const cooldown = cooldownOf(error, rotatedFrom);
 				if (cooldown) rejections.set(identity, { until: Date.now() + cooldown.ms, reason: cooldown.reason });
 				lastFailure = error instanceof Error ? error.message : String(error);
 				logger.warn("judgment candidate failed", {
@@ -331,11 +335,19 @@ export class ChainJudge implements Judge {
 		return list;
 	}
 
-	async #createJudge(candidate: RoleChainCandidate, signal: AbortSignal | undefined): Promise<Judge | undefined> {
+	async #createJudge(
+		candidate: RoleChainCandidate,
+		rotatedFrom: unknown[],
+		signal: AbortSignal | undefined,
+	): Promise<Judge | undefined> {
 		const model = candidate.model;
 		if (model.api === "local-inference") return new TextJudge(new LocalTextBackend(model.id));
 		if (!(await this.#deps.registry.getApiKey(model, this.#deps.sessionId, { signal }))) return undefined;
-		const apiKey = this.#deps.registry.resolver(model, this.#deps.sessionId);
+		const resolver = this.#deps.registry.resolver(model, this.#deps.sessionId);
+		const apiKey: ApiKeyResolver = context => {
+			if (context.error !== undefined) rotatedFrom.push(context.error);
+			return resolver(context);
+		};
 		if (isJudgmentApi(model.api)) {
 			const headers = await this.#deps.registry.resolveModelHeaders(model, signal);
 			const judge = new TypeSafeJudge({
@@ -481,17 +493,25 @@ function nativeJudge(
 /**
  * How long, and why, a failed candidate is skipped by later judgments: an
  * account rejection (401/403 credential, 402 billing cap) until something
- * changes out of band, a rate limit (429) until its advertised `retry-after`
- * expires. Other failures are not remembered.
+ * changes out of band, a rate limit (429) until the earliest `retry-after`
+ * among `error` and the credentials rotated away from before it. Any of those
+ * failures without a `retry-after` leaves a rate-limited candidate unskipped,
+ * since its credential may recover at any time; other failures are not remembered.
  */
-function cooldownOf(error: unknown): { ms: number; reason: string } | undefined {
+function cooldownOf(error: unknown, rotatedFrom: unknown[]): { ms: number; reason: string } | undefined {
 	const status = AIError.status(error);
 	if (status === 401 || status === 402 || status === 403) {
 		return { ms: CANDIDATE_REJECTION_COOLDOWN_MS, reason: "rejected the account recently" };
 	}
 	if (status !== 429) return undefined;
-	const retryAfterMs = getRetryAfterMsFromHeaders(getHeadersFromError(error));
-	return retryAfterMs === undefined ? undefined : { ms: retryAfterMs, reason: "is rate-limited" };
+	let ms = Number.POSITIVE_INFINITY;
+	for (const failure of [...rotatedFrom, error]) {
+		const retryAfterMs =
+			AIError.status(failure) === 429 ? getRetryAfterMsFromHeaders(getHeadersFromError(failure)) : undefined;
+		if (retryAfterMs === undefined) return undefined;
+		ms = Math.min(ms, retryAfterMs);
+	}
+	return { ms, reason: "is rate-limited" };
 }
 
 function isAbortOrTimeout(error: unknown): boolean {
