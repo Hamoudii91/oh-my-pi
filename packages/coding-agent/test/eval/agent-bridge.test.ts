@@ -6,6 +6,7 @@ import {
 	type EvalAgentBridgeOptions,
 	type EvalAgentResult,
 } from "@oh-my-pi/pi-coding-agent/eval/agent-bridge";
+import { runEvalBudget } from "@oh-my-pi/pi-coding-agent/eval/budget-bridge";
 import { runEvalWait } from "@oh-my-pi/pi-coding-agent/eval/handle-bridge";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as taskDiscovery from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -168,6 +169,43 @@ describe("runEvalAgent", () => {
 		).rejects.toThrow("cleanup failed");
 
 		expect(sessionManager.getTurnBudget().spent).toBe(4_567);
+	});
+
+	it("blocks admission exactly when the budget() ceiling is hard and exhausted", async () => {
+		// Disabled spawns turn a passed budget guard into a deterministic policy refusal, so nothing launches.
+		const spawnRefusal = "spawns disabled for this agent";
+		const cases: Array<{
+			turn: { total: number | null; hard: boolean; spent: number };
+			goal?: { tokenBudget?: number; tokensUsed: number };
+			error: string;
+		}> = [
+			{ turn: { total: null, hard: false, spent: 0 }, error: spawnRefusal },
+			{
+				turn: { total: null, hard: false, spent: 0 },
+				goal: { tokenBudget: 20, tokensUsed: 20 },
+				error: "Goal Mode token budget exhausted (20/20 tokens)",
+			},
+			{ turn: { total: null, hard: false, spent: 0 }, goal: { tokensUsed: 50 }, error: spawnRefusal },
+			{ turn: { total: 10, hard: true, spent: 10 }, error: "turn token budget exhausted (10/10 output tokens)" },
+			{ turn: { total: 10, hard: false, spent: 10 }, error: spawnRefusal },
+			{ turn: { total: 10, hard: true, spent: 9 }, error: spawnRefusal },
+			// An unexhausted +Nk! directive overrides an exhausted goal budget.
+			{ turn: { total: 10, hard: true, spent: 9 }, goal: { tokenBudget: 20, tokensUsed: 20 }, error: spawnRefusal },
+		];
+		for (const { turn, goal, error } of cases) {
+			const sessionManager = SessionManager.inMemory();
+			sessionManager.beginTurnBudget(turn.total, turn.hard);
+			sessionManager.recordEvalSubagentOutput(turn.spent);
+			const session = {
+				...createBudgetSession(sessionManager),
+				getSessionSpawns: () => "",
+				getGoalModeState: () => (goal ? { enabled: true, goal } : undefined),
+			} as unknown as ToolSession;
+			const budget = await runEvalBudget({}, { session });
+			const blocked = budget.hard && budget.total !== null && budget.spent >= budget.total;
+			expect(blocked).toBe(error !== spawnRefusal);
+			await expect(runEvalAgent({ prompt: "local", agent: "task" }, { session })).rejects.toThrow(error);
+		}
 	});
 
 	it("does not route ordinary task subagents through the eval budget accumulator", async () => {
