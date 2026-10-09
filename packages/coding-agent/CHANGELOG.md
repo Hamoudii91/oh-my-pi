@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Fixed hashline edits with stale line numbers after a shifting edit being accepted one line off, duplicating a line, when the replacement restated the line above or below the intended range; they are rejected with the "never displayed" reveal again ([#15035](https://github.com/can1357/oh-my-pi/issues/15035))
 - Reduced memory growth after one-shot side requests without interrupting ongoing conversations ([#14334](https://github.com/can1357/oh-my-pi/pull/14334) by [@iliaal](https://github.com/iliaal)).
 - Fixed sessions staying untitled when you interrupted the first reply to send a queued steer message.
 - Fixed `/rename` without a title dropping the session's title card (icon and short code) ([#14980](https://github.com/can1357/oh-my-pi/issues/14980))
