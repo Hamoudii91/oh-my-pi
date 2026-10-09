@@ -10,11 +10,12 @@ import {
 	type ReadRenderArgs,
 	type ReadToolDetails,
 	readContentCode,
+	readResultIsMarkdown,
 	readSourceFsPath,
 	splitPathAndSel,
 } from "../tools/read";
 import { PREVIEW_LIMITS, shortenPath } from "../render/render-utils";
-import { fileHyperlink, renderCodeCell } from "../render";
+import { fileHyperlink, renderCodeCell, renderMarkdownCell } from "../render";
 import { canonicalizeMessage } from "./thinking-display";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
 import type { ToolExecutionHandle } from "./tool-execution";
@@ -22,7 +23,7 @@ import { formatUsageRow } from "../overlays/usage-row";
 import { formatCount } from "@oh-my-pi/pi-utils";
 import type { TspCardStatus, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeToolHead } from "../tools/renderer";
-import { card, code, keyed, node, span, text, withHidden } from "../native/describe";
+import { card, code, keyed, md, node, span, text, withHidden } from "../native/describe";
 import {
 	type DescribeContext,
 	type NativeChild,
@@ -121,6 +122,10 @@ type ReadEntry = {
 	status: "pending" | "success" | "warning" | "error";
 	correctedFrom?: string;
 	contentText?: string;
+	/** Preview as rendered Markdown instead of numbered source; see {@link readResultIsMarkdown}. */
+	markdown?: boolean;
+	/** The call's `raw` arg, which keeps Markdown previews as source. */
+	raw?: boolean;
 	conflictCount?: number;
 	codeStartLine?: number;
 	codeLineNumbers?: Array<number | null>;
@@ -429,6 +434,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			status: "pending",
 		};
 		entry.path = rawPath;
+		entry.raw = args.raw === true;
 		this.#entries.set(toolCallId, entry);
 		this.#updateDisplay();
 	}
@@ -485,6 +491,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			typeof details?.conflictCount === "number" && details.conflictCount > 0 ? details.conflictCount : undefined;
 		entry.conflictCount = conflictCount;
 		entry.status = result.isError ? "error" : suffixResolution ? "warning" : "success";
+		entry.markdown = readResultIsMarkdown(details, { path: entry.path, raw: entry.raw });
 		// Store clean display content for preview/expanded display when the read
 		// tool provides it; fall back to model-facing text for legacy results.
 		const displayContent = details?.displayContent;
@@ -715,17 +722,19 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		);
 	}
 
-	/** One read's content as numbered `code`, trimmed to its first lines (plus a count) while collapsed. */
+	/** One read's content as numbered `code` (or Markdown), trimmed to its first lines (plus a count) while collapsed. */
 	#nativePreview(entry: ReadEntry): NativeChild[] {
 		const split = splitPathAndSel(entry.path);
 		const lines = (entry.contentText ?? "").split("\n");
 		const shown = this.#expanded ? lines.length : Math.min(lines.length, COLLAPSED_PREVIEW_LINES);
-		const blocks: NativeChild[] = readContentCode(
-			lines.slice(0, shown).join("\n"),
-			entry.codeStartLine ?? firstSelectorLine(split.sel) ?? 1,
-			entry.codeLineNumbers?.slice(0, shown),
-			getLanguageFromPath(split.path),
-		);
+		const blocks: NativeChild[] = entry.markdown
+			? [md(lines.slice(0, shown).join("\n"))]
+			: readContentCode(
+					lines.slice(0, shown).join("\n"),
+					entry.codeStartLine ?? firstSelectorLine(split.sel) ?? 1,
+					entry.codeLineNumbers?.slice(0, shown),
+					getLanguageFromPath(split.path),
+				);
 		const hidden = lines.length - shown;
 		if (hidden > 0) {
 			blocks.push(
@@ -796,11 +805,13 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 						preview: { lines: COLLAPSED_PREVIEW_LINES },
 					},
 					[
-						code(entry.contentText ?? "", {
-							lang: getLanguageFromPath(split.path),
-							start: entry.codeStartLine,
-							numbers: true,
-						}),
+						entry.markdown
+							? md(entry.contentText ?? "")
+							: code(entry.contentText ?? "", {
+									lang: getLanguageFromPath(split.path),
+									start: entry.codeStartLine,
+									numbers: true,
+								}),
 					],
 					`p${entry.toolCallId}`,
 				),
@@ -1124,7 +1135,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	/**
-	 * Add a code-cell content preview below the entry summary.
+	 * Add a code-cell (or Markdown-cell) content preview below the entry summary.
 	 * When collapsed: shows first COLLAPSED_PREVIEW_LINES lines with a "… N more lines ⟨<key>: Expand⟩" hint.
 	 * When expanded: shows full content.
 	 */
@@ -1147,20 +1158,33 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const component: Component = {
 			render: (width: number) => {
 				if (cachedLines && cachedWidth === width) return cachedLines;
-				cachedLines = renderCodeCell(
-					{
-						code: entry.contentText ?? "",
-						language: lang,
-						title,
-						status: entry.status === "success" ? "complete" : entry.status,
-						expanded,
-						codeMaxLines: expanded ? undefined : COLLAPSED_PREVIEW_LINES,
-						codeStartLine: entry.codeStartLine,
-						codeLineNumbers: entry.codeLineNumbers,
-						width,
-					},
-					theme,
-				);
+				const status = entry.status === "success" ? "complete" : entry.status;
+				cachedLines = entry.markdown
+					? renderMarkdownCell(
+							{
+								content: entry.contentText ?? "",
+								title,
+								status,
+								expanded,
+								contentMaxLines: COLLAPSED_PREVIEW_LINES,
+								width,
+							},
+							theme,
+						)
+					: renderCodeCell(
+							{
+								code: entry.contentText ?? "",
+								language: lang,
+								title,
+								status,
+								expanded,
+								codeMaxLines: expanded ? undefined : COLLAPSED_PREVIEW_LINES,
+								codeStartLine: entry.codeStartLine,
+								codeLineNumbers: entry.codeLineNumbers,
+								width,
+							},
+							theme,
+						);
 				cachedWidth = width;
 				return cachedLines;
 			},
