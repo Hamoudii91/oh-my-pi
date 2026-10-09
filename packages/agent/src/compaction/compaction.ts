@@ -691,7 +691,7 @@ export interface SummaryOptions {
 	 * or `compaction_turn_prefix`). `undefined` keeps the call paths zero-cost.
 	 */
 	telemetry?: AgentTelemetry;
-	/** Observe each successful local summary request for session billing. */
+	/** Observe every completed local summary attempt for session billing, including errors and retries. */
 	onUsage?: (response: AssistantMessage, purpose: string) => void;
 	/**
 	 * Active session thinking level. Threaded from `agent-session.ts` so
@@ -1001,6 +1001,7 @@ async function summarizeConversationWindow(
 		return remote.summary;
 	}
 
+	const onUsage = options?.onUsage;
 	const response = await instrumentedCompleteSimple(
 		model,
 		{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
@@ -1022,6 +1023,7 @@ async function summarizeConversationWindow(
 			oneshotKind: "compaction_summary",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
+			onAttemptCompleted: onUsage && (response => onUsage(response, "compaction:summary")),
 		},
 	);
 
@@ -1034,7 +1036,6 @@ async function summarizeConversationWindow(
 		.map(c => c.text)
 		.join("\n");
 
-	options?.onUsage?.(response, "compaction:summary");
 	return textContent;
 }
 
@@ -1093,7 +1094,7 @@ export interface HandoffFromContextOptions {
 	telemetry?: AgentTelemetry;
 	/** See {@link HandoffOptions.thinkingLevel}. */
 	thinkingLevel?: ThinkingLevel;
-	/** Observe the successful handoff request for session billing. */
+	/** Observe each completed handoff attempt for session billing, including errors and retries. */
 	onUsage?: (response: AssistantMessage) => void;
 }
 
@@ -1125,13 +1126,20 @@ export async function generateHandoffFromContext(
 		oneshotKind: "handoff",
 		completeImpl: options.completeImpl,
 		retry: {},
+		onAttemptCompleted: options.onUsage,
 	});
 	if (response.stopReason === "error" && shouldRetryHandoffWithAutoToolChoice(response)) {
 		response = await instrumentedCompleteSimple(
 			model,
 			context,
 			{ ...requestOptions, toolChoice: "auto" },
-			{ telemetry: options.telemetry, oneshotKind: "handoff", completeImpl: options.completeImpl, retry: {} },
+			{
+				telemetry: options.telemetry,
+				oneshotKind: "handoff",
+				completeImpl: options.completeImpl,
+				retry: {},
+				onAttemptCompleted: options.onUsage,
+			},
 		);
 	}
 
@@ -1139,7 +1147,6 @@ export async function generateHandoffFromContext(
 		throw createSummarizationError("Handoff generation failed", response);
 	}
 
-	options.onUsage?.(response);
 	return response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
 		.map(c => c.text)
@@ -1216,6 +1223,7 @@ async function generateShortSummary(
 		return remote.summary;
 	}
 
+	const onUsage = options?.onUsage;
 	const response = await instrumentedCompleteSimple(
 		model,
 		{
@@ -1240,6 +1248,7 @@ async function generateShortSummary(
 			oneshotKind: "compaction_short_summary",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
+			onAttemptCompleted: onUsage && (response => onUsage(response, "compaction:short-summary")),
 		},
 	);
 
@@ -1247,7 +1256,6 @@ async function generateShortSummary(
 		throw createSummarizationError("Short summary failed", response);
 	}
 
-	options?.onUsage?.(response, "compaction:short-summary");
 	return response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
 		.map(c => c.text)
@@ -2170,6 +2178,7 @@ async function generateTurnPrefixSummary(
 		},
 	];
 
+	const onUsage = options?.onUsage;
 	const response = await instrumentedCompleteSimple(
 		model,
 		{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
@@ -2191,6 +2200,7 @@ async function generateTurnPrefixSummary(
 			oneshotKind: "compaction_turn_prefix",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
+			onAttemptCompleted: onUsage && (response => onUsage(response, "compaction:turn-prefix")),
 		},
 	);
 
@@ -2198,7 +2208,6 @@ async function generateTurnPrefixSummary(
 		throw createSummarizationError("Turn prefix summarization failed", response);
 	}
 
-	options?.onUsage?.(response, "compaction:turn-prefix");
 	return response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
 		.map(c => c.text)
