@@ -6,6 +6,10 @@
 
 - Reduced syntax-highlighting startup work by bundling the complete precompiled grammar set ([#14104](https://github.com/can1357/oh-my-pi/pull/14104) by [@iliaal](https://github.com/iliaal)).
 
+### Fixed
+
+- PowerShell, `ps1`, and `pwsh` code blocks now receive syntax colors; languages without a bundled grammar no longer claim highlighting support ([#15008](https://github.com/can1357/oh-my-pi/issues/15008)).
+
 ## [18.8.4] - 2026-10-08
 
 ### Fixed
