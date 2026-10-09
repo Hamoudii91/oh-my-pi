@@ -748,6 +748,72 @@ describe("openai-completions compatibility", () => {
 		expect(replayMessages.find(message => message.role === "tool")?.tool_call_id).toBe(toolCallId);
 	});
 
+	it("clamps oversized foreign tool-call IDs on cross-model replay while preserving same-model IDs (#15056)", () => {
+		const model: Model<"openai-completions"> = buildModel({
+			id: "gpt-5.6-sol",
+			name: "GPT via LiteLLM",
+			api: "openai-completions",
+			provider: "litellm",
+			baseUrl: "http://localhost:4000/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		} satisfies ModelSpec<"openai-completions">);
+		// Identical first 64+ chars: plain truncation would collapse both calls onto one id.
+		const prefix = `vertex_tool_00000000-0000-0000-0000-000000000000__sig_${"Q".repeat(1200)}`;
+		const ids = [`${prefix}+first==`, `${prefix}/second=`];
+		const history = (sourceModel: string): Context => ({
+			messages: [
+				{ role: "user", content: "Read both", timestamp: 1 },
+				{
+					role: "assistant",
+					content: ids.map(id => ({ type: "toolCall", id, name: "read", arguments: { path: id.slice(-6) } })),
+					api: "openai-completions",
+					provider: "litellm",
+					model: sourceModel,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 2,
+				},
+				...ids.map((id): ToolResultMessage => ({
+					role: "toolResult",
+					toolCallId: id,
+					toolName: "read",
+					content: [{ type: "text", text: `result ${id.slice(-6)}` }],
+					isError: false,
+					timestamp: 3,
+				})),
+			],
+		});
+		const pairs = (context: Context) => {
+			const messages = convertMessages(model, context, model.compat);
+			const callIds = messages.flatMap(message =>
+				message.role === "assistant" ? (message.tool_calls ?? []).map(call => call.id) : [],
+			);
+			const resultIds = messages.flatMap(message => (message.role === "tool" ? [message.tool_call_id] : []));
+			return { callIds, resultIds };
+		};
+
+		const crossModel = pairs(history("gemini-3-pro"));
+		expect(crossModel.callIds).toHaveLength(2);
+		expect(new Set(crossModel.callIds).size).toBe(2);
+		for (const id of crossModel.callIds) expect(id.length).toBeLessThanOrEqual(64);
+		expect(crossModel.resultIds).toEqual(crossModel.callIds);
+
+		const sameModel = pairs(history(model.id));
+		expect(sameModel.callIds).toEqual(ids);
+		expect(sameModel.resultIds).toEqual(ids);
+	});
+
 	it("keeps unindexed batched tool-call arguments isolated", async () => {
 		const model: Model<"openai-completions"> = buildModel({
 			...gpt4oMiniSpec,

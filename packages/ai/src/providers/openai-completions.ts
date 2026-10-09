@@ -118,7 +118,7 @@ import {
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
-import { transformMessages } from "./transform-messages";
+import { MAX_TOOL_CALL_ID_LENGTH, transformMessages } from "./transform-messages";
 import {
 	isOpenAICompletionsVisionSupported,
 	joinTextWithImagePlaceholder,
@@ -2305,6 +2305,13 @@ export function convertMessages(
 		}
 
 		if (compat.usesOpenAIToolCallIdLimit) return id.length > 40 ? id.slice(0, 40) : id;
+		// Foreign ids can be gateway-encoded (e.g. LiteLLM folds Gemini thought
+		// signatures into a 1000+ char id); OpenAI-compatible hosts reject ids
+		// over 64 chars. Clamp with a hash suffix so distinct ids stay distinct.
+		if (!isSameModelSource && id.length > MAX_TOOL_CALL_ID_LENGTH) {
+			const hash = Bun.hash(id).toString(36);
+			return `${id.slice(0, MAX_TOOL_CALL_ID_LENGTH - hash.length - 1)}_${hash}`;
+		}
 		return id;
 	};
 	const transformedMessages = transformMessages(
