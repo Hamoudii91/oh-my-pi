@@ -199,6 +199,19 @@ describe("images of compacted history", () => {
 		await session.close();
 	});
 
+	it("restores the images a later compaction keeps again when it moves the kept range back", async () => {
+		const session = await fileBackedSession();
+		const history = appendHistory(session);
+		expect(isBlobRef(imageOf(entryById(session, history.userIds[1])))).toBe(true);
+
+		// An extension may pick a `firstKeptEntryId` before the previous compaction's.
+		session.appendCompaction("summary 2", undefined, history.userIds[1], 1000, { fromExtension: true });
+
+		expect(imageOf(entryById(session, history.userIds[1]))).toBe(image(1));
+		expect(isBlobRef(imageOf(entryById(session, history.userIds[0])))).toBe(true);
+		await session.close();
+	});
+
 	it("does not treat a provider-native compaction as a boundary", async () => {
 		const session = await fileBackedSession();
 		const history = appendHistory(session, {

@@ -2109,9 +2109,12 @@ export class SessionManager {
 	/**
 	 * A compaction archives the entries before its kept range: nothing on the
 	 * active path reads their images again, so keep them as blob refs instead of
-	 * base64 in memory. Provider-native compactions archive nothing.
+	 * base64 in memory. Provider-native compactions archive nothing. A compaction
+	 * may also keep entries an earlier one archived (an extension chooses its own
+	 * `firstKeptEntryId`), so the kept range is restored first.
 	 */
 	#externalizeArchivedImages(): void {
+		this.#inlineActiveImages();
 		this.#archivedImagesPending = this.#persist && !this.#canExternalizeImages();
 		if (!this.#canExternalizeImages()) return;
 		for (const entry of archivedEntries(this.#index.branchView())) {
