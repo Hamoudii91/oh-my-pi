@@ -6,7 +6,6 @@ import type {
 	StreamFn,
 	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
-import type { CompactionRequestUsage } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	AssistantMessage,
 	Context,
@@ -472,8 +471,6 @@ export interface SendUserMessageOptions {
 export interface HandoffResult {
 	document: string;
 	savedPath?: string;
-	/** Model request to journal when the generated document is committed. */
-	requestUsage?: CompactionRequestUsage;
 }
 
 /** Options controlling handoff generation. */

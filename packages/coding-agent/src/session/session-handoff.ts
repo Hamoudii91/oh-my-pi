@@ -9,7 +9,6 @@ import {
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import {
-	type CompactionRequestUsage,
 	compactionRequestUsage,
 	generateHandoffFromContext,
 	renderHandoffPrompt,
@@ -101,6 +100,8 @@ export class SessionHandoff {
 		options?: SessionHandoffOptions,
 	): Promise<HandoffResult | undefined> {
 		this.#host.setSkipPostTurnMaintenance(undefined);
+		const manager = this.#host.sessionManager;
+		const usageOwner = { sessionId: manager.getSessionId(), parentId: manager.getLeafId() };
 
 		this.#handoffAbortController = new AbortController();
 		const handoffAbortController = this.#handoffAbortController;
@@ -175,7 +176,6 @@ export class SessionHandoff {
 				},
 				model.provider,
 			);
-			let requestUsage: CompactionRequestUsage | undefined;
 			const rawHandoffText = await generateHandoffFromContext(
 				obfuscateProviderContext(this.#host.obfuscator(), handoffContext),
 				model,
@@ -192,7 +192,9 @@ export class SessionHandoff {
 					// requireSupportedEffort.
 					thinkingLevel: this.#host.thinkingLevel(),
 					onUsage: response => {
-						requestUsage = compactionRequestUsage(response, "compaction:handoff");
+						manager.appendModelUsage(compactionRequestUsage(response, "compaction:handoff"), usageOwner, {
+							followCurrentBranch: true,
+						});
 					},
 				},
 			);
@@ -236,7 +238,7 @@ export class SessionHandoff {
 				}
 			}
 
-			return { document: handoffText, savedPath, requestUsage };
+			return { document: handoffText, savedPath };
 		} catch (error) {
 			// Only a genuine cancellation (user Esc or an unreasoned source-signal
 			// abort) maps to "Handoff cancelled". A harness-provided abort reason and

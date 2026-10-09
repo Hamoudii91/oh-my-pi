@@ -12,6 +12,31 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
+function summaryResponse(model: Model): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	queueMicrotask(() => {
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "Condensed conversation" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 80,
+				output: 20,
+				cacheRead: 30,
+				cacheWrite: 0,
+				totalTokens: 130,
+				cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 0, total: 6 },
+			},
+			timestamp: Date.now(),
+		};
+		stream.push({ type: "done", reason: "stop", message });
+	});
+	return stream;
+}
+
 /**
  * Regression for issue #5064.
  *
@@ -128,30 +153,7 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 	});
 
 	it("journals every soft summary request and includes its cost in active session totals", async () => {
-		const sideStreamFn: StreamFn = model => {
-			const stream = new AssistantMessageEventStream();
-			queueMicrotask(() => {
-				const message: AssistantMessage = {
-					role: "assistant",
-					content: [{ type: "text", text: "Condensed conversation" }],
-					api: model.api,
-					provider: model.provider,
-					model: model.id,
-					stopReason: "stop",
-					usage: {
-						input: 80,
-						output: 20,
-						cacheRead: 30,
-						cacheWrite: 0,
-						totalTokens: 130,
-						cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 0, total: 6 },
-					},
-					timestamp: Date.now(),
-				};
-				stream.push({ type: "done", reason: "stop", message });
-			});
-			return stream;
-		};
+		const sideStreamFn: StreamFn = summaryResponse;
 		const { session, sessionManager } = await createHarness(sideStreamFn);
 		await session.compact(undefined, { mode: "soft" });
 
@@ -169,6 +171,21 @@ describe("AgentSession manual snapcompact text-only fallback", () => {
 			.map(line => JSON.parse(line));
 		expect(persisted.filter(entry => entry.type === "model_usage").map(entry => entry.usage.cacheRead)).toEqual([
 			30, 30,
+		]);
+	});
+
+	it("keeps billed summary usage when the short-summary request fails", async () => {
+		let requests = 0;
+		const sideStreamFn: StreamFn = model => {
+			if (++requests === 1) return summaryResponse(model);
+			throw new Error("Short summary request failed");
+		};
+		const { session, sessionManager } = await createHarness(sideStreamFn);
+
+		await expect(session.compact(undefined, { mode: "soft" })).rejects.toThrow("Short summary request failed");
+		expect(sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
+		expect(sessionManager.getBranch().filter(entry => entry.type === "model_usage")).toMatchObject([
+			{ purpose: "compaction:summary", usage: { input: 80, output: 20, cacheRead: 30, cost: { total: 6 } } },
 		]);
 	});
 
