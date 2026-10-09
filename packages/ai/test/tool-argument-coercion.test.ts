@@ -1735,6 +1735,27 @@ describe("Tool argument coercion", () => {
 		expect(validateToolArguments(tool, call)).toEqual({ mode: "route", note: "null" });
 	});
 
+	it("keeps mutually dependent null-string filters while dropping a rejected one", () => {
+		const tool: Tool = {
+			name: "dependent-filters",
+			description: "",
+			parameters: {
+				type: "object",
+				properties: { a: { type: "string" }, b: { type: "string" }, bad: { type: "string" } },
+				dependentRequired: { a: ["b"], b: ["a"] },
+				not: { required: ["bad"] },
+			} as unknown as Tool["parameters"],
+		};
+		const call: ToolCall = {
+			type: "toolCall",
+			id: "call-dependent",
+			name: "dependent-filters",
+			arguments: { a: "null", b: "null", bad: "null" },
+		};
+
+		expect(validateToolArguments(tool, call)).toEqual({ a: "null", b: "null" });
+	});
+
 	it("removes optional string 'null' when an ArkType predicate rejects it", () => {
 		const tool: Tool = {
 			name: "filtered-alerts",

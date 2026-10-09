@@ -1830,14 +1830,25 @@ function withValueAtPath(node: unknown, path: (string | number)[], depth: number
 	return { ...node, [segment]: child };
 }
 
-/** Keep valid "null" strings when a failed-call repair drops several optional fields. */
-function restoreValidNullStrings(ctx: ValidationContext, original: unknown, stripped: unknown): unknown {
-	let repaired = stripped;
+/**
+ * Find the valid repair that drops the fewest optional "null" strings.
+ * Try smaller removal sets first so dependent fields survive together; if
+ * the search grows too large, report the validation error rather than silently
+ * dropping valid filters.
+ */
+function restoreValidNullStrings(ctx: ValidationContext, original: unknown, stripped: unknown): unknown | undefined {
+	const paths: string[] = [];
 	const path: (string | number)[] = [];
+	let full = stripped;
 	const visit = (value: unknown): void => {
 		if (value === "null") {
-			const candidate = withValueAtPath(repaired, path, 0, value);
-			if (candidate !== repaired && validateContext(ctx, candidate).success) repaired = candidate;
+			const pointer = pathToPointer(path);
+			if (getValueAtPointer(stripped, pointer) !== undefined) return;
+			const candidate = withValueAtPath(full, path, 0, value);
+			if (candidate !== full) {
+				paths.push(pointer);
+				full = candidate;
+			}
 			return;
 		}
 		if (Array.isArray(value)) {
@@ -1856,7 +1867,28 @@ function restoreValidNullStrings(ctx: ValidationContext, original: unknown, stri
 		}
 	};
 	visit(original);
-	return repaired;
+
+	const maxCandidates = 256;
+	let checked = 0;
+	const findValid = (candidate: unknown, start: number, remaining: number): unknown | undefined => {
+		if (remaining === 0) {
+			if (checked++ >= maxCandidates) return undefined;
+			return validateContext(ctx, candidate).success ? candidate : undefined;
+		}
+		for (let index = start; index <= paths.length - remaining && checked < maxCandidates; index++) {
+			const next = deleteValueAtPointer(candidate, paths[index]!);
+			if (next === candidate) continue;
+			const valid = findValid(next, index + 1, remaining - 1);
+			if (valid !== undefined) return valid;
+		}
+		return undefined;
+	};
+
+	for (let removed = 0; removed <= paths.length && checked < maxCandidates; removed++) {
+		const valid = findValid(full, 0, removed);
+		if (valid !== undefined) return valid;
+	}
+	return undefined;
 }
 
 // In-band `arg_key`/`arg_value` tool-call syntax that leaks into native
@@ -2170,8 +2202,10 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 	const stripped = normalizeOptionalNullsForSchema(json, normalizedArgs, true, json, false, false, true);
 	if (stripped.changed && validateContext(ctx, stripped.value).success) {
 		const repaired = restoreValidNullStrings(ctx, normalizedArgs, stripped.value);
-		const validated = validateContext(ctx, repaired);
-		if (validated.success) return validated.value as ToolCall["arguments"];
+		if (repaired !== undefined) {
+			const validated = validateContext(ctx, repaired);
+			if (validated.success) return validated.value as ToolCall["arguments"];
+		}
 	}
 
 	// Format validation errors nicely. The header phrase is asserted by
