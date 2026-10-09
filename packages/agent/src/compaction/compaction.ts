@@ -141,6 +141,24 @@ function extractFileOperations(
 	return fileOps;
 }
 
+/** Billing metadata for one local compaction model request. */
+export type CompactionRequestUsage = Pick<
+	AssistantMessage,
+	"api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage"
+> & { purpose: string };
+/** Extracts the billing fields of a successful compaction completion for its session ledger. */
+export function compactionRequestUsage(response: AssistantMessage, purpose: string): CompactionRequestUsage {
+	return {
+		purpose,
+		api: response.api,
+		provider: response.provider,
+		model: response.model,
+		usage: response.usage,
+		stopReason: response.stopReason,
+		errorMessage: response.errorMessage,
+	};
+}
+
 /** Result from compact() - SessionManager adds uuid/parentUuid when saving */
 export interface CompactionResult<T = unknown> {
 	summary: string;
@@ -673,6 +691,8 @@ export interface SummaryOptions {
 	 * or `compaction_turn_prefix`). `undefined` keeps the call paths zero-cost.
 	 */
 	telemetry?: AgentTelemetry;
+	/** Observe each successful local summary request for session billing. */
+	onUsage?: (response: AssistantMessage, purpose: string) => void;
 	/**
 	 * Active session thinking level. Threaded from `agent-session.ts` so
 	 * compaction honors the user's `/model` thinking selection instead of
@@ -1014,6 +1034,7 @@ async function summarizeConversationWindow(
 		.map(c => c.text)
 		.join("\n");
 
+	options?.onUsage?.(response, "compaction:summary");
 	return textContent;
 }
 
@@ -1072,6 +1093,8 @@ export interface HandoffFromContextOptions {
 	telemetry?: AgentTelemetry;
 	/** See {@link HandoffOptions.thinkingLevel}. */
 	thinkingLevel?: ThinkingLevel;
+	/** Observe the successful handoff request for session billing. */
+	onUsage?: (response: AssistantMessage) => void;
 }
 
 /**
@@ -1116,6 +1139,7 @@ export async function generateHandoffFromContext(
 		throw createSummarizationError("Handoff generation failed", response);
 	}
 
+	options.onUsage?.(response);
 	return response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
 		.map(c => c.text)
@@ -1223,6 +1247,7 @@ async function generateShortSummary(
 		throw createSummarizationError("Short summary failed", response);
 	}
 
+	options?.onUsage?.(response, "compaction:short-summary");
 	return response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
 		.map(c => c.text)
@@ -1605,6 +1630,7 @@ export async function compact(
 		buildProviderContext: options?.buildProviderContext,
 		isUserAuthored: options?.isUserAuthored,
 		telemetry: options?.telemetry,
+		onUsage: options?.onUsage,
 		// Honor /model thinking selection on every fan-out summarizer.
 		// Without this propagation, generateSummary / generateTurnPrefixSummary
 		// see options?.thinkingLevel === undefined and resolveCompactionEffort
@@ -2172,6 +2198,7 @@ async function generateTurnPrefixSummary(
 		throw createSummarizationError("Turn prefix summarization failed", response);
 	}
 
+	options?.onUsage?.(response, "compaction:turn-prefix");
 	return response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
 		.map(c => c.text)

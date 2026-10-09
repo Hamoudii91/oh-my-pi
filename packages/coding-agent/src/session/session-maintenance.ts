@@ -18,8 +18,10 @@ import {
 	type CompactionDetails,
 	type CompactionPreparation,
 	type CompactionResult,
+	type CompactionRequestUsage,
 	calculateContextTokens,
 	collectShakeRegions,
+	compactionRequestUsage,
 	compact,
 	compactionContextTokens,
 	computeFileLists,
@@ -332,6 +334,7 @@ const PAYLOAD_REJECTION_OCCUPANCY_CEILING = 0.9;
 /** A speculation-produced compaction result, ready to commit at threshold. */
 interface ArmedSpeculation {
 	result: CompactionResult;
+	modelUsages?: CompactionRequestUsage[];
 	action: "context-full" | "handoff" | "remote";
 	method: CompactionMethod;
 	codexCompaction?: CodexCompactionContext;
@@ -1324,6 +1327,7 @@ export class SessionMaintenance {
 			let tokensBefore: number;
 			let details: unknown;
 			let codexCompaction: CodexCompactionContext | undefined;
+			let modelUsages: CompactionRequestUsage[] | undefined;
 
 			// Snapcompact runs locally first. The frame cap is sized from the live
 			// model window via #computeSnapcompactMaxFrames so the post-render context
@@ -1455,6 +1459,9 @@ export class SessionMaintenance {
 							remoteSystemPrompt: this.#host.agent.state.systemPrompt,
 							convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 							codexCompaction,
+							onUsage: (response, purpose) => {
+								(modelUsages ??= []).push(compactionRequestUsage(response, purpose));
+							},
 						},
 						compactionCandidates,
 					);
@@ -1496,6 +1503,7 @@ export class SessionMaintenance {
 				fromExtension,
 				preserveData,
 				method: fromExtension ? undefined : selectedMethod,
+				modelUsages,
 				codexCompaction,
 				advisorResetReason: "compact",
 			});
@@ -2047,6 +2055,7 @@ export class SessionMaintenance {
 				preserveData: undefined,
 				method: "handoff",
 				codexCompaction: undefined,
+				modelUsages: result.requestUsage ? [result.requestUsage] : undefined,
 				advisorResetReason: "handoff",
 			});
 			return result;
@@ -2238,6 +2247,7 @@ export class SessionMaintenance {
 				method,
 				snapshotLeafId,
 				contextTokensAtStart: contextTokens,
+				modelUsages: generated.requestUsage ? [generated.requestUsage] : undefined,
 			};
 		} else {
 			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, undefined);
@@ -2256,6 +2266,7 @@ export class SessionMaintenance {
 				reason: "context_limit",
 				phase: "standalone_turn",
 			});
+			const modelUsages: CompactionRequestUsage[] = [];
 			const result = await this.#compactWithFallbackModel(
 				preparation,
 				undefined,
@@ -2270,6 +2281,9 @@ export class SessionMaintenance {
 					// overlapping the live stream must never interleave with it.
 					sessionId: `${this.#host.sessionId()}:spec:${Snowflake.next()}`,
 					preferWebsockets: false,
+					onUsage: (response, purpose) => {
+						modelUsages.push(compactionRequestUsage(response, purpose));
+					},
 				},
 				candidates,
 			);
@@ -2283,6 +2297,7 @@ export class SessionMaintenance {
 				codexCompaction,
 				snapshotLeafId,
 				contextTokensAtStart: contextTokens,
+				modelUsages,
 			};
 		}
 		if (signal.aborted || this.#speculation !== run) return;
@@ -2407,6 +2422,7 @@ export class SessionMaintenance {
 		firstKeptEntryId: string;
 		tokensBefore: number;
 		details: unknown;
+		modelUsages?: CompactionRequestUsage[];
 		fromExtension: boolean;
 		preserveData: Record<string, unknown> | undefined;
 		method: CompactionMethod | undefined;
@@ -2415,6 +2431,17 @@ export class SessionMaintenance {
 		advisorResetReason: string;
 		detachExtensionEmit?: boolean;
 	}): Promise<CompactionEntry | undefined> {
+		// Keep the compaction as the branch leaf so an unchanged history cannot be compacted twice.
+		if (args.modelUsages?.length) {
+			const owner = {
+				sessionId: this.#host.sessionManager.getSessionId(),
+				parentId: this.#host.sessionManager.getLeafId(),
+			};
+			for (const usage of args.modelUsages) {
+				const usageId = this.#host.sessionManager.appendModelUsage(usage, owner);
+				if (usageId) owner.parentId = usageId;
+			}
+		}
 		const entryId = this.#host.sessionManager.appendCompaction(
 			args.summary,
 			args.shortSummary,
@@ -4426,6 +4453,7 @@ export class SessionMaintenance {
 					tokensBefore: options.triggerContextTokens ?? armedSpec.result.tokensBefore,
 					details: armedSpec.result.details,
 					preserveData: armedSpec.result.preserveData,
+					modelUsages: armedSpec.modelUsages,
 					fromExtension: false,
 					codexCompaction: armedSpec.codexCompaction,
 					method: armedSpec.method,
@@ -4709,6 +4737,7 @@ export class SessionMaintenance {
 			let firstKeptEntryId: string;
 			let tokensBefore: number;
 			let details: unknown;
+			let modelUsages: CompactionRequestUsage[] | undefined;
 
 			// Snapcompact runs locally first. The post-compaction context = kept-recent
 			// + a summary message carrying the imaged archive at the reading model's
@@ -4857,6 +4886,7 @@ export class SessionMaintenance {
 				tokensBefore = preparation.tokensBefore;
 				details = handoffSummary.details;
 				preserveData = compactionPrep.preserveData;
+				modelUsages = handoffDocument.requestUsage ? [handoffDocument.requestUsage] : undefined;
 			} else if (snapcompactResult) {
 				summary = snapcompactResult.summary;
 				shortSummary = snapcompactResult.shortSummary;
@@ -4885,6 +4915,8 @@ export class SessionMaintenance {
 						(reason === "threshold" ? "pre_turn" : reason === "idle" ? "standalone_turn" : "mid_turn"),
 				});
 
+				const requestUsages: CompactionRequestUsage[] = [];
+				modelUsages = requestUsages;
 				for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
 					const candidate = candidates[candidateIndex];
 					const hasMoreCandidates = candidateIndex < candidates.length - 1;
@@ -4918,6 +4950,9 @@ export class SessionMaintenance {
 										this.#host.buildLiveProviderContext(summarized, retained, signal),
 									isUserAuthored: isUserAuthoredMessage,
 									telemetry,
+									onUsage: (response, purpose) => {
+										requestUsages.push(compactionRequestUsage(response, purpose));
+									},
 									// Honor the user's /model thinking selection on the
 									// auto-compaction path — the most-fired compaction
 									// site. Clamped per-model inside compact() via
@@ -5058,6 +5093,7 @@ export class SessionMaintenance {
 				tokensBefore,
 				details,
 				preserveData,
+				modelUsages,
 				fromExtension,
 				codexCompaction,
 				method: fromExtension ? undefined : method,
@@ -5150,6 +5186,7 @@ export class SessionMaintenance {
 		tokensBefore: number;
 		details: unknown;
 		preserveData: Record<string, unknown> | undefined;
+		modelUsages?: CompactionRequestUsage[];
 		fromExtension: boolean;
 		codexCompaction: CodexCompactionContext | undefined;
 		method: CompactionMethod | undefined;
@@ -5191,6 +5228,7 @@ export class SessionMaintenance {
 			fromExtension: args.fromExtension,
 			preserveData: args.preserveData,
 			codexCompaction: args.codexCompaction,
+			modelUsages: args.modelUsages,
 			method: args.method,
 			providerReplayThroughEntryId: args.providerReplayThroughEntryId,
 			advisorResetReason: "auto-compaction",

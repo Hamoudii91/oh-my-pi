@@ -8,7 +8,12 @@ import {
 	type StreamFn,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
-import { generateHandoffFromContext, renderHandoffPrompt } from "@oh-my-pi/pi-agent-core/compaction";
+import {
+	type CompactionRequestUsage,
+	compactionRequestUsage,
+	generateHandoffFromContext,
+	renderHandoffPrompt,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import type { Message, Model, ServiceTier, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
@@ -170,6 +175,7 @@ export class SessionHandoff {
 				},
 				model.provider,
 			);
+			let requestUsage: CompactionRequestUsage | undefined;
 			const rawHandoffText = await generateHandoffFromContext(
 				obfuscateProviderContext(this.#host.obfuscator(), handoffContext),
 				model,
@@ -185,6 +191,9 @@ export class SessionHandoff {
 					// resolveCompactionEffort so unsupported-effort models don't trip
 					// requireSupportedEffort.
 					thinkingLevel: this.#host.thinkingLevel(),
+					onUsage: response => {
+						requestUsage = compactionRequestUsage(response, "compaction:handoff");
+					},
 				},
 			);
 			const handoffText = this.#host.deobfuscateFromProvider(rawHandoffText);
@@ -227,7 +236,7 @@ export class SessionHandoff {
 				}
 			}
 
-			return { document: handoffText, savedPath };
+			return { document: handoffText, savedPath, requestUsage };
 		} catch (error) {
 			// Only a genuine cancellation (user Esc or an unreasoned source-signal
 			// abort) maps to "Handoff cancelled". A harness-provided abort reason and
