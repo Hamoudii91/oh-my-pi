@@ -748,8 +748,8 @@ describe("openai-completions compatibility", () => {
 		expect(replayMessages.find(message => message.role === "tool")?.tool_call_id).toBe(toolCallId);
 	});
 
-	it("clamps oversized foreign tool-call IDs on cross-model replay while preserving same-model IDs (#15056)", () => {
-		const model: Model<"openai-completions"> = buildModel({
+	it("caps oversized IDs for a limited target without stripping Gemini gateway signatures (#15056)", () => {
+		const modelSpec: ModelSpec<"openai-completions"> = {
 			id: "gpt-5.6-sol",
 			name: "GPT via LiteLLM",
 			api: "openai-completions",
@@ -760,7 +760,9 @@ describe("openai-completions compatibility", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: 128_000,
 			maxTokens: 8_192,
-		} satisfies ModelSpec<"openai-completions">);
+		};
+		const model = buildModel(modelSpec);
+		const gemini = buildModel({ ...modelSpec, id: "gemini-3-flash", name: "Gemini via LiteLLM" });
 		// Identical first 64+ chars: plain truncation would collapse both calls onto one id.
 		const prefix = `vertex_tool_00000000-0000-0000-0000-000000000000__sig_${"Q".repeat(1200)}`;
 		const ids = [`${prefix}+first==`, `${prefix}/second=`];
@@ -794,8 +796,8 @@ describe("openai-completions compatibility", () => {
 				})),
 			],
 		});
-		const pairs = (context: Context) => {
-			const messages = convertMessages(model, context, model.compat);
+		const pairs = (target: Model<"openai-completions">, context: Context) => {
+			const messages = convertMessages(target, context, target.compat);
 			const callIds = messages.flatMap(message =>
 				message.role === "assistant" ? (message.tool_calls ?? []).map(call => call.id) : [],
 			);
@@ -803,13 +805,17 @@ describe("openai-completions compatibility", () => {
 			return { callIds, resultIds };
 		};
 
-		const crossModel = pairs(history("gemini-3-pro"));
+		const crossModel = pairs(model, history("gemini-3-pro"));
 		expect(crossModel.callIds).toHaveLength(2);
 		expect(new Set(crossModel.callIds).size).toBe(2);
 		for (const id of crossModel.callIds) expect(id.length).toBeLessThanOrEqual(64);
 		expect(crossModel.resultIds).toEqual(crossModel.callIds);
 
-		const sameModel = pairs(history(model.id));
+		const sameGateway = pairs(gemini, history("gemini-3-pro"));
+		expect(sameGateway.callIds).toEqual(ids);
+		expect(sameGateway.resultIds).toEqual(ids);
+
+		const sameModel = pairs(gemini, history(gemini.id));
 		expect(sameModel.callIds).toEqual(ids);
 		expect(sameModel.resultIds).toEqual(ids);
 	});

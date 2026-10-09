@@ -118,7 +118,7 @@ import {
 	shouldDropAutoToolChoiceForReasoning,
 	shouldRetryWithoutStrictTools,
 } from "./openai-shared";
-import { MAX_TOOL_CALL_ID_LENGTH, transformMessages } from "./transform-messages";
+import { transformMessages } from "./transform-messages";
 import {
 	isOpenAICompletionsVisionSupported,
 	joinTextWithImagePlaceholder,
@@ -2286,7 +2286,7 @@ export function convertMessages(
 		? 9
 		: compat.usesOpenAIToolCallIdLimit
 			? 40
-			: undefined;
+			: compat.maxToolCallIdLength;
 	const duplicateToolCallIdSuffixPrefix = compat.requiresMistralToolIds ? "dup" : undefined;
 	const normalizeToolCallId = (id: string, source?: AssistantMessage): string => {
 		if (compat.requiresMistralToolIds) return normalizeMistralToolId(id, true);
@@ -2305,12 +2305,11 @@ export function convertMessages(
 		}
 
 		if (compat.usesOpenAIToolCallIdLimit) return id.length > 40 ? id.slice(0, 40) : id;
-		// Foreign ids can be gateway-encoded (e.g. LiteLLM folds Gemini thought
-		// signatures into a 1000+ char id); OpenAI-compatible hosts reject ids
-		// over 64 chars. Clamp with a hash suffix so distinct ids stay distinct.
-		if (!isSameModelSource && id.length > MAX_TOOL_CALL_ID_LENGTH) {
+		// Only targets with a known limit may discard opaque gateway state.
+		// Hashing keeps long IDs with identical prefixes distinct.
+		if (!isSameModelSource && compat.maxToolCallIdLength !== undefined && id.length > compat.maxToolCallIdLength) {
 			const hash = Bun.hash(id).toString(36);
-			return `${id.slice(0, MAX_TOOL_CALL_ID_LENGTH - hash.length - 1)}_${hash}`;
+			return `${id.slice(0, compat.maxToolCallIdLength - hash.length - 1)}_${hash}`;
 		}
 		return id;
 	};
