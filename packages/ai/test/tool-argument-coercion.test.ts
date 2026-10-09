@@ -1686,25 +1686,27 @@ describe("Tool argument coercion", () => {
 		expect(result.tick_size).toBeUndefined();
 	});
 
-	it("strips string 'null' on optional string field", () => {
+	it("keeps string 'null' on an optional field whose schema accepts it", () => {
+		// #15016: "null" is a real value for string fields (e.g. Alertmanager's
+		// `null` receiver); dropping it silently widened MCP queries.
 		const tool: Tool = {
-			name: "edit-tool",
+			name: "list_alerts",
 			description: "",
-			parameters: type({
-				path: type("string"),
-				move: type("string").optional(),
-			}),
+			parameters: {
+				type: "object",
+				properties: { receiver: { type: "string" }, limit: { type: "integer" } },
+			} as unknown as Tool["parameters"],
 		};
 
 		const toolCall: ToolCall = {
 			type: "toolCall",
-			id: "call-edit",
-			name: "edit-tool",
-			arguments: { path: "file.ts", move: "null" },
+			id: "call-alerts",
+			name: "list_alerts",
+			arguments: { receiver: "null", limit: "null" },
 		};
 
 		const result = validateToolArguments(tool, toolCall);
-		expect(result).toEqual({ path: "file.ts" });
+		expect(result).toEqual({ receiver: "null" });
 	});
 
 	it("errors on string 'null' for required field", () => {
