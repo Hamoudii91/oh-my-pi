@@ -818,6 +818,18 @@ describe("openai-completions compatibility", () => {
 		const sameModel = pairs(gemini, history(gemini.id));
 		expect(sameModel.callIds).toEqual(ids);
 		expect(sameModel.resultIds).toEqual(ids);
+
+		// A models.yml/SDK `compat.maxToolCallIdLength` on an unlisted gateway must take effect.
+		const configured = buildModel({
+			...modelSpec,
+			id: "custom-limited",
+			provider: "custom-gateway",
+			compat: { maxToolCallIdLength: 48 },
+		});
+		const overridden = pairs(configured, history("gemini-3-pro"));
+		expect(new Set(overridden.callIds).size).toBe(2);
+		for (const id of overridden.callIds) expect(id.length).toBeLessThanOrEqual(48);
+		expect(overridden.resultIds).toEqual(overridden.callIds);
 	});
 
 	it("keeps unindexed batched tool-call arguments isolated", async () => {
