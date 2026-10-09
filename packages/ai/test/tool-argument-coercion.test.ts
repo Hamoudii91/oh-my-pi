@@ -1709,6 +1709,50 @@ describe("Tool argument coercion", () => {
 		expect(result).toEqual({ receiver: "null" });
 	});
 
+	it("removes optional string 'null' when a cross-field JSON Schema rule rejects it", () => {
+		const tool: Tool = {
+			name: "route-alerts",
+			description: "",
+			parameters: {
+				type: "object",
+				properties: { receiver: { type: "string" }, note: { type: "string" }, mode: { type: "string" } },
+				allOf: [
+					{
+						if: { properties: { mode: { const: "route" } }, required: ["mode"] },
+						// oxlint-disable-next-line unicorn/no-thenable -- JSON Schema keyword
+						then: { not: { required: ["receiver"] } },
+					},
+				],
+			} as unknown as Tool["parameters"],
+		};
+		const call: ToolCall = {
+			type: "toolCall",
+			id: "call-route",
+			name: "route-alerts",
+			arguments: { mode: "route", receiver: "null", note: "null" },
+		};
+
+		expect(validateToolArguments(tool, call)).toEqual({ mode: "route", note: "null" });
+	});
+
+	it("removes optional string 'null' when an ArkType predicate rejects it", () => {
+		const tool: Tool = {
+			name: "filtered-alerts",
+			description: "",
+			parameters: type({ receiver: "string?", mode: "string" }).narrow(
+				args => args.mode !== "route" || args.receiver === undefined,
+			),
+		};
+		const call: ToolCall = {
+			type: "toolCall",
+			id: "call-filtered",
+			name: "filtered-alerts",
+			arguments: { mode: "route", receiver: "null" },
+		};
+
+		expect(validateToolArguments(tool, call)).toEqual({ mode: "route" });
+	});
+
 	it("errors on string 'null' for required field", () => {
 		const tool: Tool = {
 			name: "required-tool",
